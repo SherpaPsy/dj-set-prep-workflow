@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "dj-set-prep-workflow"
+version = "0.1.0"
+description = "Python workflow tools for DJ set preparation"
+authors = ["SherpaPsy"]
+readme = "README.md"
+packages = [{ include = "dj_set_prep_workflow", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+mutagen = "^1.47.0"
+
+[tool.poetry.scripts]
+dj-tag = "dj_set_prep_workflow.tag_set_mp3s:main"
+dj-flow = "dj_set_prep_workflow.run_set_prep_flow:main"
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"
