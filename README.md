@@ -38,13 +38,13 @@ Optional separator line every few tracks:
 
 Default source MP3 folder:
 
-`C:\Users\sherp\OneDrive\Music\ReleasePromo On OneDrive`
+`C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\SourceMP3s`
 
 Global config variables in `src/dj_set_prep_workflow/tag_set_mp3s.py`:
 
 - `YEAR = 2026`
-- `MP3_SOURCE = C:\Users\sherp\OneDrive\Music\ReleasePromo On OneDrive`
-- `INIT_TARGET_PATH = D:\MyMusic\Mixes\{YEAR} Mixes`
+- `MP3_SOURCE = C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\SourceMP3s`
+- `INIT_TARGET_PATH = C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\Metadata`
 
 ### Run
 
@@ -84,20 +84,37 @@ python tag_set_mp3s.py "D:\MyMusic\Mixes\2026 Mixes\2026.02.28" --dry-run
 
 Command: `dj-flow`
 
+Expected root directory structure:
+
+```text
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep
+├── Artwork
+├── ConvertedAIFF
+├── Logs
+├── Metadata
+│   ├── raw-track-metadata.txt
+│   └── processed-track-metadata.txt
+├── ProcessedAIFF
+└── SourceMP3s
+```
+
 What it does:
 
-1. Suggests a target set folder from `INIT_TARGET_PATH` (nearest future date folder) and lets you select.
-2. Tags matched source MP3 files in `MP3_SOURCE` (no moving).
-3. Converts matched tracks to 24-bit AIFF in `TARGET_PATH\AIFF` via ffmpeg.
-4. Runs RX10 headless preset (`DJ Set Prep`) and writes output to `TARGET_PATH\aiffProcessed`.
-5. Runs Essentia extractor (`streaming_extractor_music.exe <aiff> <json>`) on files in `aiffProcessed`.
-6. Adds summarized Essentia info into AIFF comment tag on files in `aiffProcessed` (BPM, Camelot key, Camelot chords, energy). If key/chord metadata is present but unmapped, output uses `unknown`.
-7. Generates `import_to_itunes.ps1` in target folder (pointing at `aiffProcessed`) and prompts manual iTunes import/playlist step.
+1. Reads `Metadata/raw-track-metadata.txt` for title/artist/[label year] entries.
+2. Matches each entry to one MP3 in `SourceMP3s`.
+3. Processes tracks one-by-one:
+	- reads existing MP3 tags into memory,
+	- converts to 24-bit AIFF in `ConvertedAIFF`,
+	- runs pre-master tool into `ProcessedAIFF` (or passthrough if skipped),
+	- runs Essentia and writes JSON logs to `Logs`,
+	- updates destination AIFF tags in `ProcessedAIFF`.
+4. Writes full per-track metadata output to `Metadata/processed-track-metadata.txt`.
+5. Stops before iTunes import/playlist steps.
 
-If RX10 headless is not available yet, you can temporarily skip that stage and still test the rest of the flow:
+If pre-master executable is not available yet, you can temporarily skip that stage and still test the rest of the flow:
 
 ```powershell
-poetry run dj-flow --target-path "D:\MyMusic\Mixes\2026 Mixes\2026.02.28" --skip-rx10 --max-tracks 1 --no-interactive-unsure
+poetry run dj-flow --skip-premaster --max-tracks 1 --no-interactive-unsure
 ```
 
 Dry run:
@@ -106,16 +123,16 @@ Dry run:
 poetry run dj-flow --dry-run
 ```
 
-Explicit target path:
+Use explicit root and tool paths:
 
 ```powershell
-poetry run dj-flow --target-path "D:\MyMusic\Mixes\2026 Mixes\2026.02.28" --dry-run
+poetry run dj-flow --prep-root "C:\Users\sherp\OneDrive\Music\DJ-Set-Prep" --ffmpeg-exe "D:\AudioTools\ffmpeg\bin\ffmpeg.exe" --essentia-exe "D:\AudioTools\essentia-extractors-v2.1_beta2\streaming_extractor_music.exe" --dry-run
 ```
 
 Disable interactive unsure-match prompts:
 
 ```powershell
-poetry run dj-flow --target-path "D:\MyMusic\Mixes\2026 Mixes\2026.02.28" --no-interactive-unsure
+poetry run dj-flow --no-interactive-unsure
 ```
 
 Custom genre:

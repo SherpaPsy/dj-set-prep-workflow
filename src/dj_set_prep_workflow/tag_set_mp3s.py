@@ -13,8 +13,9 @@ SEPARATOR = "===================="
 
 # Global configuration
 YEAR = 2026
-MP3_SOURCE = Path(r"C:\Users\sherp\OneDrive\Music\ReleasePromo On OneDrive")
-INIT_TARGET_PATH = Path(rf"D:\MyMusic\Mixes\{YEAR} Mixes")
+DJ_SET_PREP_ROOT = Path(r"C:\Users\sherp\OneDrive\Music\DJ-Set-Prep")
+MP3_SOURCE = DJ_SET_PREP_ROOT / "SourceMP3s"
+INIT_TARGET_PATH = DJ_SET_PREP_ROOT / "Metadata"
 
 
 @dataclass(slots=True)
@@ -308,7 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=MP3_SOURCE,
         help=(
             "Root folder containing source MP3 files (searched recursively). "
-            "Default: C:\\Users\\sherp\\OneDrive\\Music\\ReleasePromo On OneDrive"
+            "Default: C:\\Users\\sherp\\OneDrive\\Music\\DJ-Set-Prep\\SourceMP3s"
         ),
     )
     parser.add_argument(
