@@ -4,29 +4,24 @@ import argparse
 import json
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mutagen import File as MutagenFile
 from mutagen.aiff import AIFF
 from mutagen.id3 import COMM, ID3, TALB, TCON, TIT2, TPE1, TPE2, TDRC
-from mutagen.mp3 import MP3
 
-from .tag_set_mp3s import (
-    TrackEntry,
-    find_mp3_files,
-    parse_set_file,
-    select_match_mp3,
-)
+from .tag_set_mp3s import TrackEntry, normalize, parse_set_file
 
 DEFAULT_PREP_ROOT = Path(r"C:\Users\sherp\OneDrive\Music\DJ-Set-Prep")
+DEFAULT_REAPER_EXE = Path(r"C:\Program Files\REAPER (x64)\reaper.exe")
 DEFAULT_ESSENTIA_EXE = Path(
     r"D:\AudioTools\essentia-extractors-v2.1_beta2\streaming_extractor_music.exe"
 )
-DEFAULT_PREMASTER_EXE = Path(
-    r"C:\Program Files\iZotope\RX 10 Audio Editor\win64\RX10Headless.exe"
-)
-DEFAULT_PREMASTER_PRESET = "DJ Set Prep"
+
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".aif", ".aiff", ".flac", ".m4a"}
 
 
 @dataclass(slots=True)
@@ -37,9 +32,16 @@ class PrepPaths:
     logs: Path
     metadata: Path
     processed_aiff: Path
-    source_mp3s: Path
+    source_files: Path
+    templates: Path
     raw_metadata_file: Path
     processed_metadata_file: Path
+
+
+@dataclass(slots=True)
+class MetadataMatch:
+    entry: TrackEntry | None
+    source: str
 
 
 def build_prep_paths(prep_root: Path) -> PrepPaths:
@@ -51,13 +53,14 @@ def build_prep_paths(prep_root: Path) -> PrepPaths:
         logs=prep_root / "Logs",
         metadata=metadata_dir,
         processed_aiff=prep_root / "ProcessedAIFF",
-        source_mp3s=prep_root / "SourceMP3s",
+        source_files=prep_root / "Sourcefiles",
+        templates=prep_root / "Templates",
         raw_metadata_file=metadata_dir / "raw-track-metadata.txt",
         processed_metadata_file=metadata_dir / "processed-track-metadata.txt",
     )
 
 
-def ensure_prep_dirs(paths: PrepPaths) -> None:
+def ensure_dirs(paths: PrepPaths) -> None:
     for directory in [
         paths.root,
         paths.artwork,
@@ -65,190 +68,210 @@ def ensure_prep_dirs(paths: PrepPaths) -> None:
         paths.logs,
         paths.metadata,
         paths.processed_aiff,
-        paths.source_mp3s,
+        paths.source_files,
+        paths.templates,
     ]:
         directory.mkdir(parents=True, exist_ok=True)
 
 
-def first_tag_value(tag_values: dict[str, list[str]], key: str) -> str | None:
-    values = tag_values.get(key)
-    if not values:
-        return None
-    value = str(values[0]).strip()
-    return value or None
+def maybe_confirm(confirm_steps: bool, message: str) -> None:
+    if confirm_steps:
+        input(f"[CONFIRM] {message} Press Enter to continue...")
 
 
-def id3_to_dict(tags: ID3 | None) -> dict[str, list[str]]:
-    payload: dict[str, list[str]] = {}
-    if tags is None:
-        return payload
-
-    for key in tags.keys():
-        frame = tags.get(key)
-        text_values = getattr(frame, "text", None)
-        if text_values:
-            payload[key] = [str(item) for item in text_values]
-    return payload
+def list_source_files(source_dir: Path) -> list[Path]:
+    return sorted(
+        [
+            path
+            for path in source_dir.rglob("*")
+            if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS
+        ]
+    )
 
 
-def read_source_mp3_tags(mp3_path: Path) -> dict[str, list[str]]:
-    audio = MP3(mp3_path)
-    return id3_to_dict(audio.tags)
+def extract_tags_dict(audio_path: Path) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "full_path": str(audio_path),
+        "file_name": audio_path.name,
+        "file_stem": audio_path.stem,
+        "extension": audio_path.suffix.lower(),
+    }
+
+    audio = MutagenFile(str(audio_path), easy=True)
+    if audio and audio.tags:
+        for key, values in dict(audio.tags).items():
+            if isinstance(values, list):
+                data[key] = [str(value) for value in values]
+            else:
+                data[key] = [str(values)]
+
+    return data
 
 
-def resolve_metadata_file(paths: PrepPaths, set_file: Path | None) -> Path:
-    candidate = set_file or paths.raw_metadata_file
-    if not candidate.exists():
-        raise FileNotFoundError(f"Metadata track list file not found: {candidate}")
-    if candidate.stat().st_size == 0:
-        raise ValueError(f"Metadata track list is empty: {candidate}")
-    return candidate
+def append_suffix_to_title(title: str, suffix: str | None) -> str:
+    if not suffix:
+        return title
+
+    title_norm = normalize(title)
+    suffix_norm = normalize(suffix)
+    if suffix_norm and title_norm.endswith(suffix_norm):
+        return title
+
+    return f"{title} {suffix}".strip()
 
 
-def run_tagging_on_aiff(
-    aiff_path: Path,
-    entry: TrackEntry,
-    source_tags: dict[str, list[str]],
-    essentia_summary: str,
-    default_genre: str,
-    dry_run: bool,
-) -> dict[str, list[str]]:
-    base_title = first_tag_value(source_tags, "TIT2") or entry.title.strip() or aiff_path.stem
+def find_metadata_match(
+    metadata_entries: list[TrackEntry],
+    source_tags: dict[str, Any],
+    used_entry_indices: set[int],
+    fallback_index: int,
+) -> MetadataMatch:
+    title = str((source_tags.get("title") or [source_tags.get("file_stem", "")])[0]).strip()
+    artist = str((source_tags.get("artist") or [""])[0]).strip()
 
-    label_year_suffix = ""
-    if entry.label and entry.year:
-        label_year_suffix = f" [{entry.label} {entry.year}]"
-    elif entry.label:
-        label_year_suffix = f" [{entry.label}]"
-    elif entry.year:
-        label_year_suffix = f" [{entry.year}]"
+    title_key = normalize(title)
+    artist_key = normalize(artist)
 
-    if label_year_suffix and not base_title.lower().endswith(label_year_suffix.lower()):
-        final_title = f"{base_title}{label_year_suffix}".strip()
-    else:
-        final_title = base_title
-
-    artist_value = first_tag_value(source_tags, "TPE1") or entry.artist
-    album_artist_value = artist_value
-    year_value = first_tag_value(source_tags, "TDRC") or entry.year
-    genre_value = first_tag_value(source_tags, "TCON") or default_genre
-    album_value = first_tag_value(source_tags, "TALB") or "DJ Set Prep"
-
-    if dry_run:
-        print(
-            f"[DRY-RUN] AIFF tag {aiff_path.name} -> title='{final_title}', artist='{artist_value}', "
-            f"album_artist='{album_artist_value}', year='{year_value}', genre='{genre_value}', comment='{essentia_summary}'"
-        )
-        result: dict[str, list[str]] = {
-            "TIT2": [final_title],
-            "TPE1": [artist_value],
-            "TPE2": [album_artist_value],
-            "COMM:essentia": [essentia_summary],
-        }
-        if year_value:
-            result["TDRC"] = [str(year_value)]
-        if genre_value:
-            result["TCON"] = [genre_value]
-        if album_value:
-            result["TALB"] = [album_value]
-        return result
-
-    audio = AIFF(aiff_path)
-    tags = audio.tags
-    if tags is None:
-        tags = ID3()
-        audio.tags = tags
-
-    tags.setall("TIT2", [TIT2(encoding=3, text=[final_title])])
-    tags.setall("TPE1", [TPE1(encoding=3, text=[artist_value])])
-    tags.setall("TPE2", [TPE2(encoding=3, text=[album_artist_value])])
-
-    if year_value and not tags.get("TDRC"):
-        tags.setall("TDRC", [TDRC(encoding=3, text=[str(year_value)])])
-    if genre_value and not tags.get("TCON"):
-        tags.setall("TCON", [TCON(encoding=3, text=[genre_value])])
-    if album_value and not tags.get("TALB"):
-        tags.setall("TALB", [TALB(encoding=3, text=[album_value])])
-
-    tags.delall("COMM")
-    tags.add(COMM(encoding=3, lang="eng", desc="essentia", text=[essentia_summary]))
-    tags.save(aiff_path)
-    return id3_to_dict(tags)
-
-
-def match_entries_to_mp3s(
-    entries: list[TrackEntry],
-    source_dir: Path,
-    interactive_unsure: bool,
-) -> list[tuple[TrackEntry, Path]]:
-    mp3_files = find_mp3_files(source_dir)
-    if not mp3_files:
-        raise FileNotFoundError(f"No .mp3 files found in source dir: {source_dir}")
-
-    used: set[Path] = set()
-    matched: list[tuple[TrackEntry, Path]] = []
-
-    for entry in entries:
-        path = select_match_mp3(entry, mp3_files, used, interactive_unsure=interactive_unsure)
-        if not path:
+    for idx, entry in enumerate(metadata_entries):
+        if idx in used_entry_indices:
             continue
-        used.add(path)
-        matched.append((entry, path))
+        if normalize(entry.title) == title_key and normalize(entry.artist) == artist_key:
+            used_entry_indices.add(idx)
+            return MetadataMatch(entry=entry, source="title+artist")
 
-    return matched
+    if 0 <= fallback_index < len(metadata_entries) and fallback_index not in used_entry_indices:
+        used_entry_indices.add(fallback_index)
+        return MetadataMatch(entry=metadata_entries[fallback_index], source="sequential-fallback")
+
+    return MetadataMatch(entry=None, source="none")
 
 
-def convert_single_mp3_to_aiff_24bit(mp3_path: Path, output_dir: Path, ffmpeg_exe: str, dry_run: bool) -> Path:
-    output_path = output_dir / f"{mp3_path.stem}.aiff"
-    cmd = [ffmpeg_exe, "-y", "-i", str(mp3_path), "-c:a", "pcm_s24be", str(output_path)]
+def metadata_suffix(entry: TrackEntry | None) -> str | None:
+    if not entry:
+        return None
+
+    if entry.label and entry.year:
+        return f"[{entry.label} {entry.year}]".strip()
+    if entry.label:
+        return f"[{entry.label.strip()}]"
+    if entry.year:
+        return f"[{entry.year.strip()}]"
+    return None
+
+
+def convert_to_aiff(source_file: Path, converted_dir: Path, ffmpeg_exe: str, dry_run: bool) -> Path:
+    output_path = converted_dir / f"{source_file.stem}.aiff"
+    cmd = [ffmpeg_exe, "-y", "-i", str(source_file), "-c:a", "pcm_s24be", str(output_path)]
+    print(f"[START] Convert -> {output_path.name}")
     if dry_run:
         print(f"[DRY-RUN] ffmpeg: {' '.join(cmd)}")
     else:
         subprocess.run(cmd, check=True)
+    print(f"[INFO] Converted AIFF: {output_path}")
+    print("[DONE] Convert")
     return output_path
 
 
-def run_premaster(
-    input_aiff: Path,
-    output_dir: Path,
-    premaster_exe: Path,
-    preset: str,
-    skip_premaster: bool,
+def copy_to_template_input(converted_aiff: Path, templates_dir: Path, dry_run: bool) -> Path:
+    template_input = templates_dir / "input.aiff"
+    print(f"[START] Copy to template input -> {template_input}")
+    if dry_run:
+        print(f"[DRY-RUN] copy: {converted_aiff} -> {template_input}")
+    else:
+        shutil.copy2(converted_aiff, template_input)
+    print("[DONE] Copy to template input")
+    return template_input
+
+
+def run_reaper_render(
+    reaper_exe: Path,
+    reaper_project: Path,
+    logs_dir: Path,
+    file_stem: str,
     dry_run: bool,
 ) -> Path:
-    output_path = output_dir / input_aiff.name
+    output_path = logs_dir.parent / "ProcessedAIFF" / "output.aif"
+    log_path = logs_dir / f"{file_stem}.reaper.log"
+    cmd = [str(reaper_exe), "-renderproject", str(reaper_project)]
 
-    if skip_premaster:
-        if dry_run:
-            print(f"[DRY-RUN] Skip pre-master passthrough: {input_aiff} -> {output_path}")
-        else:
-            shutil.copy2(input_aiff, output_path)
-        return output_path
-
-    cmd = [
-        str(premaster_exe),
-            "--headless",
-            "--preset",
-            preset,
-            "--input",
-        str(input_aiff),
-            "--output",
-            str(output_path),
-    ]
+    print("[START] Reaper render")
+    print(f"[INFO] Reaper project: {reaper_project}")
     if dry_run:
-        print(f"[DRY-RUN] Pre-master: {' '.join(cmd)}")
+        print(f"[DRY-RUN] Reaper: {' '.join(cmd)}")
+        print(f"[DRY-RUN] Reaper expected output: {output_path}")
     else:
-        subprocess.run(cmd, check=True)
+        print("[INFO] Reaper rendering started (this step can be slow)...")
+        started = time.monotonic()
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        while process.poll() is None:
+            elapsed = int(time.monotonic() - started)
+            print(f"[INFO] Reaper still rendering... {elapsed}s")
+            time.sleep(5)
+
+        stdout, stderr = process.communicate()
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, cmd, output=stdout, stderr=stderr)
+
+        elapsed = time.monotonic() - started
+        log_path.write_text((stdout or "") + "\n" + (stderr or ""), encoding="utf-8")
+        print(f"[INFO] Reaper log: {log_path}")
+        print(f"[INFO] Reaper output (expected): {output_path}")
+        print(f"[INFO] Reaper duration: {elapsed:.1f}s")
+    print("[DONE] Reaper render")
     return output_path
 
 
-def run_essentia_single(aiff_file: Path, logs_dir: Path, essentia_exe: Path, dry_run: bool) -> Path:
-    json_path = logs_dir / f"{aiff_file.stem}.essentia.json"
-    cmd = [str(essentia_exe), str(aiff_file), str(json_path)]
+def rename_render_output(processed_dir: Path, target_stem: str, dry_run: bool) -> Path:
+    src = processed_dir / "output.aif"
+    dst = processed_dir / f"{target_stem}.aif"
+    print(f"[START] Rename render output -> {dst.name}")
+    if dry_run:
+        print(f"[DRY-RUN] rename: {src} -> {dst}")
+    else:
+        if not src.exists():
+            raise FileNotFoundError(f"Expected Reaper output not found: {src}")
+        if dst.exists():
+            dst.unlink()
+        src.rename(dst)
+    print(f"[INFO] Rendered AIFF: {dst}")
+    print("[DONE] Rename render output")
+    return dst
+
+
+def run_essentia_single(
+    rendered_file: Path,
+    logs_dir: Path,
+    essentia_exe: Path,
+    dry_run: bool,
+) -> Path:
+    json_path = logs_dir / f"{rendered_file.stem}.essentia.json"
+    log_path = logs_dir / f"{rendered_file.stem}.essentia.log"
+    cmd = [str(essentia_exe), str(rendered_file), str(json_path)]
+
+    print("[START] Essentia")
+    print(f"[INFO] Essentia input: {rendered_file}")
+    print(f"[INFO] Essentia output JSON: {json_path}")
     if dry_run:
         print(f"[DRY-RUN] Essentia: {' '.join(cmd)}")
     else:
-        subprocess.run(cmd, check=True)
+        print("[INFO] Essentia processing started (this step can be slow)...")
+        started = time.monotonic()
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        while process.poll() is None:
+            elapsed = int(time.monotonic() - started)
+            print(f"[INFO] Essentia still running... {elapsed}s")
+            time.sleep(5)
+
+        stdout, stderr = process.communicate()
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, cmd, output=stdout, stderr=stderr)
+
+        elapsed = time.monotonic() - started
+        log_path.write_text((stdout or "") + "\n" + (stderr or ""), encoding="utf-8")
+        print(f"[INFO] Essentia log: {log_path}")
+        print(f"[INFO] Essentia duration: {elapsed:.1f}s")
+    print(f"[INFO] Essentia JSON: {json_path}")
+    print("[DONE] Essentia")
     return json_path
 
 
@@ -314,12 +337,6 @@ def extract_essentia_summary(json_path: Path) -> str:
         },
     }
 
-    def _fmt_float(value: Any, decimals: int = 2) -> str | None:
-        try:
-            return f"{float(value):.{decimals}f}"
-        except Exception:
-            return None
-
     bpm_text = None
     try:
         bpm_text = str(int(round(float(bpm))))
@@ -332,8 +349,8 @@ def extract_essentia_summary(json_path: Path) -> str:
     except Exception:
         energy_text = None
 
-    scale_key = str(scale).lower() if scale else None
     key_text = None
+    scale_key = str(scale).lower() if scale else None
     if key and scale_key in camelot_map:
         key_text = camelot_map[scale_key].get(str(key))
     if not key_text and (key or scale):
@@ -356,152 +373,240 @@ def extract_essentia_summary(json_path: Path) -> str:
     return "essentia:" + (";".join(filtered) if filtered else "no-summary")
 
 
-def write_processed_metadata(processed_metadata_file: Path, records: list[dict[str, Any]], dry_run: bool) -> None:
+def write_tags_to_processed_aiff(
+    rendered_aiff: Path,
+    source_tags: dict[str, Any],
+    metadata_entry: TrackEntry | None,
+    essentia_comment: str,
+    default_genre: str,
+    dry_run: bool,
+) -> dict[str, list[str]]:
+    base_title = str((source_tags.get("title") or [source_tags.get("file_stem", rendered_aiff.stem)])[0]).strip()
+    suffix = metadata_suffix(metadata_entry)
+    final_title = append_suffix_to_title(base_title, suffix)
+
+    artist_value = str((source_tags.get("artist") or [metadata_entry.artist if metadata_entry else ""])[0]).strip()
+    album_artist_value = artist_value
+
+    source_year = str((source_tags.get("date") or source_tags.get("year") or [""])[0]).strip()
+    metadata_year = metadata_entry.year if metadata_entry else None
+    year_value = source_year or (metadata_year or "")
+
+    genre_value = str((source_tags.get("genre") or [default_genre])[0]).strip() or default_genre
+    album_value = str((source_tags.get("album") or ["DJ Set Prep"])[0]).strip() or "DJ Set Prep"
+
+    result_tags: dict[str, list[str]] = {
+        "TIT2": [final_title],
+        "TPE1": [artist_value],
+        "TPE2": [album_artist_value],
+        "TCON": [genre_value],
+        "TALB": [album_value],
+        "COMM:essentia": [essentia_comment],
+    }
+    if year_value:
+        result_tags["TDRC"] = [year_value]
+
+    print("[START] Write tags to processed AIFF")
+    if dry_run:
+        print(f"[DRY-RUN] tags for {rendered_aiff.name}: {json.dumps(result_tags, ensure_ascii=False)}")
+        print("[DONE] Write tags to processed AIFF")
+        return result_tags
+
+    audio = AIFF(rendered_aiff)
+    tags = audio.tags
+    if tags is None:
+        tags = ID3()
+        audio.tags = tags
+
+    tags.setall("TIT2", [TIT2(encoding=3, text=[final_title])])
+    tags.setall("TPE1", [TPE1(encoding=3, text=[artist_value])])
+    tags.setall("TPE2", [TPE2(encoding=3, text=[album_artist_value])])
+
+    if year_value and not tags.get("TDRC"):
+        tags.setall("TDRC", [TDRC(encoding=3, text=[year_value])])
+
+    if not tags.get("TCON"):
+        tags.setall("TCON", [TCON(encoding=3, text=[genre_value])])
+
+    if not tags.get("TALB"):
+        tags.setall("TALB", [TALB(encoding=3, text=[album_value])])
+
+    tags.delall("COMM")
+    tags.add(COMM(encoding=3, lang="eng", desc="essentia", text=[essentia_comment]))
+    tags.save(rendered_aiff)
+
+    print("[DONE] Write tags to processed AIFF")
+    return result_tags
+
+
+def write_processed_metadata(records: list[dict[str, Any]], output_file: Path, dry_run: bool) -> None:
+    print("[START] Write processed metadata file")
     content = "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + ("\n" if records else "")
     if dry_run:
-        print(f"[DRY-RUN] Would write metadata records to {processed_metadata_file} ({len(records)} records)")
-        return
-    processed_metadata_file.write_text(content, encoding="utf-8")
+        print(f"[DRY-RUN] would write {len(records)} records to {output_file}")
+    else:
+        output_file.write_text(content, encoding="utf-8")
+    print("[DONE] Write processed metadata file")
 
 
 def run_flow(
     prep_root: Path,
     set_file: Path | None,
     source_dir: Path | None,
-    default_genre: str,
-    interactive_unsure: bool,
-    max_tracks: int | None,
-    skip_premaster: bool,
     ffmpeg_exe: str,
-    premaster_exe: Path,
-    premaster_preset: str,
+    reaper_exe: Path,
+    reaper_project: Path | None,
     essentia_exe: Path,
+    default_genre: str,
+    max_tracks: int | None,
     dry_run: bool,
+    confirm_steps: bool,
 ) -> None:
     paths = build_prep_paths(prep_root)
-    ensure_prep_dirs(paths)
+    ensure_dirs(paths)
 
-    resolved_set_file = resolve_metadata_file(paths, set_file=set_file)
-    resolved_source_dir = source_dir or paths.source_mp3s
-    entries = parse_set_file(resolved_set_file)
+    resolved_source_dir = source_dir or paths.source_files
+    resolved_set_file = set_file or paths.raw_metadata_file
+    resolved_reaper_project = reaper_project or (paths.templates / "DJ Set Prep.rpp")
 
-    print(f"\nDJ-SET-PREP root: {paths.root}")
-    print(f"Metadata input: {resolved_set_file}")
-    print(f"Source MP3s: {resolved_source_dir}")
-    print(f"ConvertedAIFF: {paths.converted_aiff}")
-    print(f"ProcessedAIFF: {paths.processed_aiff}")
-    print(f"Logs: {paths.logs}")
+    if not resolved_set_file.exists():
+        raise FileNotFoundError(f"Metadata file not found: {resolved_set_file}")
+    if not resolved_reaper_project.exists():
+        raise FileNotFoundError(f"Reaper project not found: {resolved_reaper_project}")
 
-    matched = match_entries_to_mp3s(
-        entries,
-        source_dir=resolved_source_dir,
-        interactive_unsure=interactive_unsure,
-    )
+    metadata_entries = parse_set_file(resolved_set_file)
+    source_files = list_source_files(resolved_source_dir)
+
+    if not source_files:
+        raise FileNotFoundError(f"No supported source audio files found in: {resolved_source_dir}")
+
     if max_tracks is not None and max_tracks > 0:
-        matched = matched[:max_tracks]
-    print(f"Matched tracks: {len(matched)} / {len(entries)}")
+        source_files = source_files[:max_tracks]
+
+    print(f"DJ-SET-PREP root: {paths.root}")
+    print(f"Source files dir: {resolved_source_dir}")
+    print(f"Metadata file: {resolved_set_file}")
+    print(f"Reaper project: {resolved_reaper_project}")
+    print(f"Source files discovered: {len(source_files)}")
 
     processed_records: list[dict[str, Any]] = []
-    for idx, (entry, mp3_path) in enumerate(matched, start=1):
-        print(f"\n[{idx}/{len(matched)}] Processing: {mp3_path.name}")
-        source_tags = read_source_mp3_tags(mp3_path)
+    used_entry_indices: set[int] = set()
 
-        converted_path = convert_single_mp3_to_aiff_24bit(
-            mp3_path,
-            output_dir=paths.converted_aiff,
-            ffmpeg_exe=ffmpeg_exe,
+    for idx, source_file in enumerate(source_files, start=1):
+        print(f"\n=== [{idx}/{len(source_files)}] Processing {source_file.name} ===")
+
+        source_tags = extract_tags_dict(source_file)
+        print("[INFO] Extracted tags dictionary:")
+        print(json.dumps(source_tags, ensure_ascii=False, indent=2))
+        maybe_confirm(confirm_steps, "After tag extraction")
+
+        converted_aiff = convert_to_aiff(source_file, paths.converted_aiff, ffmpeg_exe=ffmpeg_exe, dry_run=dry_run)
+        maybe_confirm(confirm_steps, "After conversion to AIFF")
+
+        copy_to_template_input(converted_aiff, paths.templates, dry_run=dry_run)
+        maybe_confirm(confirm_steps, "After copying template input.aiff")
+
+        run_reaper_render(
+            reaper_exe=reaper_exe,
+            reaper_project=resolved_reaper_project,
+            logs_dir=paths.logs,
+            file_stem=source_file.stem,
             dry_run=dry_run,
         )
-        processed_path = run_premaster(
-            converted_path,
-            output_dir=paths.processed_aiff,
-            premaster_exe=premaster_exe,
-            preset=premaster_preset,
-            skip_premaster=skip_premaster,
-            dry_run=dry_run,
-        )
+        maybe_confirm(confirm_steps, "After Reaper render")
+
+        rendered_aiff = rename_render_output(paths.processed_aiff, target_stem=source_file.stem, dry_run=dry_run)
+        maybe_confirm(confirm_steps, "After renaming rendered output")
+
         essentia_json = run_essentia_single(
-            processed_path,
+            rendered_file=rendered_aiff,
             logs_dir=paths.logs,
             essentia_exe=essentia_exe,
             dry_run=dry_run,
         )
-        essentia_summary = extract_essentia_summary(essentia_json)
-        final_tags = run_tagging_on_aiff(
-            processed_path,
-            entry=entry,
+        essentia_comment = extract_essentia_summary(essentia_json)
+        print(f"[INFO] Essentia comment: {essentia_comment}")
+        maybe_confirm(confirm_steps, "After Essentia extraction")
+
+        metadata_match = find_metadata_match(
+            metadata_entries,
             source_tags=source_tags,
-            essentia_summary=essentia_summary,
+            used_entry_indices=used_entry_indices,
+            fallback_index=idx - 1,
+        )
+        print(f"[INFO] Metadata match source: {metadata_match.source}")
+
+        processed_tags = write_tags_to_processed_aiff(
+            rendered_aiff,
+            source_tags=source_tags,
+            metadata_entry=metadata_match.entry,
+            essentia_comment=essentia_comment,
             default_genre=default_genre,
             dry_run=dry_run,
         )
+        maybe_confirm(confirm_steps, "After writing processed AIFF tags")
+
+        print(
+            "[INFO] Audio processing summary: "
+            f"converted='{converted_aiff.name}', rendered='{rendered_aiff.name}'"
+        )
+        print(f"[INFO] essentia='{essentia_json.name}'")
 
         processed_records.append(
             {
-                "source_mp3": str(mp3_path),
-                "converted_aiff": str(converted_path),
-                "processed_aiff": str(processed_path),
+                "source": {
+                    "full_path": str(source_file),
+                    "file_name": source_file.name,
+                    "file_stem": source_file.stem,
+                },
+                "converted_aiff": str(converted_aiff),
+                "template_input": str(paths.templates / "input.aiff"),
+                "processed_aiff": str(rendered_aiff),
                 "essentia_json": str(essentia_json),
-                "set_metadata": {
-                    "title": entry.title,
-                    "artist": entry.artist,
-                    "label": entry.label,
-                    "year": entry.year,
+                "metadata_match_source": metadata_match.source,
+                "metadata_entry": {
+                    "title": metadata_match.entry.title if metadata_match.entry else None,
+                    "artist": metadata_match.entry.artist if metadata_match.entry else None,
+                    "label": metadata_match.entry.label if metadata_match.entry else None,
+                    "year": metadata_match.entry.year if metadata_match.entry else None,
                 },
                 "source_tags": source_tags,
-                "processed_tags": final_tags,
-                "essentia_comment": essentia_summary,
+                "processed_tags": processed_tags,
+                "essentia_comment": essentia_comment,
             }
         )
 
-    write_processed_metadata(paths.processed_metadata_file, processed_records, dry_run=dry_run)
-    print(f"\nProcessed metadata output: {paths.processed_metadata_file}")
-    print("Flow complete (stopping before iTunes import/playlist stage).")
-
+    write_processed_metadata(processed_records, paths.processed_metadata_file, dry_run=dry_run)
+    print("\nFlow complete.")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the high-level DJ set prep flow.")
-    parser.add_argument(
-        "--prep-root",
-        type=Path,
-        default=DEFAULT_PREP_ROOT,
-        help="Root folder for DJ-SET-PREP structure.",
-    )
+    parser = argparse.ArgumentParser(description="Run DJ set prep workflow on Sourcefiles.")
+    parser.add_argument("--prep-root", type=Path, default=DEFAULT_PREP_ROOT, help="DJ-SET-PREP root directory.")
     parser.add_argument(
         "--set-file",
         type=Path,
         default=None,
-        help="Optional path to metadata text file. Defaults to Metadata/raw-track-metadata.txt under prep root.",
+        help="Optional metadata file path. Default: Metadata/raw-track-metadata.txt under prep root.",
     )
     parser.add_argument(
         "--source-dir",
         type=Path,
         default=None,
-        help="Optional override for source MP3 root. Defaults to SourceMP3s under prep root.",
-    )
-    parser.add_argument("--default-genre", default="Electronic")
-    parser.add_argument(
-        "--interactive-unsure",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Prompt to choose candidate file for uncertain matches (default: enabled).",
-    )
-    parser.add_argument(
-        "--max-tracks",
-        type=int,
-        default=None,
-        help="Optional cap on number of matched tracks to process (e.g. 1 for smoke test).",
+        help="Optional source audio directory. Default: Sourcefiles under prep root.",
     )
     parser.add_argument("--ffmpeg-exe", default="ffmpeg")
-    parser.add_argument("--premaster-exe", type=Path, default=DEFAULT_PREMASTER_EXE)
-    parser.add_argument("--premaster-preset", default=DEFAULT_PREMASTER_PRESET)
+    parser.add_argument("--reaper-exe", type=Path, default=DEFAULT_REAPER_EXE)
     parser.add_argument(
-        "--skip-premaster",
-        action="store_true",
-        help="Skip pre-master stage and copy ConvertedAIFF files into ProcessedAIFF.",
+        "--reaper-project",
+        type=Path,
+        default=None,
+        help="Optional Reaper project path. Default: Templates/DJ Set Prep.rpp under prep root.",
     )
     parser.add_argument("--essentia-exe", type=Path, default=DEFAULT_ESSENTIA_EXE)
+    parser.add_argument("--default-genre", default="Electronic")
+    parser.add_argument("--max-tracks", type=int, default=None)
+    parser.add_argument("--confirm-steps", action="store_true", help="Pause for confirmation after each stage.")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -514,15 +619,14 @@ def main() -> None:
         prep_root=args.prep_root,
         set_file=args.set_file,
         source_dir=args.source_dir,
-        default_genre=args.default_genre,
-        interactive_unsure=args.interactive_unsure,
-        max_tracks=args.max_tracks,
-        skip_premaster=args.skip_premaster,
         ffmpeg_exe=args.ffmpeg_exe,
-        premaster_exe=args.premaster_exe,
-        premaster_preset=args.premaster_preset,
+        reaper_exe=args.reaper_exe,
+        reaper_project=args.reaper_project,
         essentia_exe=args.essentia_exe,
+        default_genre=args.default_genre,
+        max_tracks=args.max_tracks,
         dry_run=args.dry_run,
+        confirm_steps=args.confirm_steps,
     )
 
 
