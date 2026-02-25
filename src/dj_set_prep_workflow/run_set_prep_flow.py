@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from mutagen import File as MutagenFile
-from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TCON, TDRC, COMM
+from mutagen.aiff import AIFF
+from mutagen.id3 import ID3, COMM, TALB, TCON, TDRC, TIT2, TPE1, TPE2
 
 from .tag_set_mp3s import TrackEntry, normalize, parse_set_file
 
 DEFAULT_PREP_ROOT = Path(r"C:\Users\sherp\OneDrive\Music\DJ-Set-Prep")
 DEFAULT_REAPER_EXE = Path(r"C:\Program Files\REAPER (x64)\reaper.exe")
+DEFAULT_FFMPEG_EXE = Path(r"D:\AudioTools\ffmpeg\bin\ffmpeg.exe")
 DEFAULT_ESSENTIA_EXE = Path(
     r"D:\AudioTools\essentia-extractors-v2.1_beta2\streaming_extractor_music.exe"
 )
@@ -31,6 +33,7 @@ class PrepPaths:
     logs: Path
     metadata: Path
     processed_aiff: Path
+    tagged_aiff: Path
     source_files: Path
     templates: Path
     raw_metadata_file: Path
@@ -52,6 +55,7 @@ def build_prep_paths(prep_root: Path) -> PrepPaths:
         logs=prep_root / "Logs",
         metadata=metadata_dir,
         processed_aiff=prep_root / "ProcessedFiles",
+        tagged_aiff=prep_root / "TaggedFiles",
         source_files=prep_root / "SourceFiles",
         templates=prep_root / "Templates",
         raw_metadata_file=metadata_dir / "raw-track-metadata.txt",
@@ -67,6 +71,7 @@ def ensure_dirs(paths: PrepPaths) -> None:
         paths.logs,
         paths.metadata,
         paths.processed_aiff,
+        paths.tagged_aiff,
         paths.source_files,
         paths.templates,
     ]:
@@ -159,8 +164,13 @@ def metadata_suffix(entry: TrackEntry | None) -> str | None:
 
 
 def convert_to_aiff(source_file: Path, converted_dir: Path, ffmpeg_exe: str, dry_run: bool) -> Path:
+    resolved_ffmpeg = shutil.which(ffmpeg_exe) if ffmpeg_exe else None
+    if not resolved_ffmpeg:
+        raise FileNotFoundError(
+            "ffmpeg executable not found. Provide --ffmpeg-exe with a full path or add ffmpeg to PATH."
+        )
     output_path = converted_dir / f"{source_file.stem}.aif"
-    cmd = [ffmpeg_exe, "-y", "-i", str(source_file), "-c:a", "pcm_s24be", str(output_path)]
+    cmd = [resolved_ffmpeg, "-y", "-i", str(source_file), "-c:a", "pcm_s24be", str(output_path)]
     print(f"[START] Convert -> {output_path.name}")
     if dry_run:
         print(f"[DRY-RUN] ffmpeg: {' '.join(cmd)}")
@@ -235,6 +245,17 @@ def rename_render_output(processed_dir: Path, target_stem: str, dry_run: bool) -
     print(f"[INFO] Rendered AIFF: {dst}")
     print("[DONE] Rename render output")
     return dst
+
+
+def copy_to_tagged(rendered_aiff: Path, tagged_dir: Path, dry_run: bool) -> Path:
+    tagged_path = tagged_dir / rendered_aiff.name
+    print(f"[START] Copy to tagged -> {tagged_path.name}")
+    if dry_run:
+        print(f"[DRY-RUN] copy: {rendered_aiff} -> {tagged_path}")
+    else:
+        shutil.copy2(rendered_aiff, tagged_path)
+    print("[DONE] Copy to tagged")
+    return tagged_path
 
 
 def run_essentia_single(
@@ -373,15 +394,15 @@ def extract_essentia_summary(json_path: Path) -> str:
     return " ".join(parts) if parts else ""
 
 
-def write_tags_to_processed_aiff(
-    rendered_aiff: Path,
+def write_tags_to_tagged_aiff(
+    tagged_aiff: Path,
     source_tags: dict[str, Any],
     metadata_entry: TrackEntry | None,
     essentia_comment: str,
     default_genre: str,
     dry_run: bool,
 ) -> dict[str, list[str]]:
-    base_title = str((source_tags.get("title") or [source_tags.get("file_stem", rendered_aiff.stem)])[0]).strip()
+    base_title = str((source_tags.get("title") or [source_tags.get("file_stem", tagged_aiff.stem)])[0]).strip()
     suffix = metadata_suffix(metadata_entry)
     final_title = append_suffix_to_title(base_title, suffix)
 
@@ -406,31 +427,31 @@ def write_tags_to_processed_aiff(
     if year_value:
         result_tags["date"] = [year_value]
 
-    print("[START] Write tags to processed AIFF")
+    print("[START] Write tags to tagged AIFF")
     if dry_run:
-        print(f"[DRY-RUN] tags for {rendered_aiff.name}: {json.dumps(result_tags, ensure_ascii=False)}")
-        print("[DONE] Write tags to processed AIFF")
+        print(f"[DRY-RUN] tags for {tagged_aiff.name}: {json.dumps(result_tags, ensure_ascii=False)}")
+        print("[DONE] Write tags to tagged AIFF")
         return result_tags
 
-    try:
-        audio = ID3(str(rendered_aiff))
-    except Exception:
-        audio = ID3()
+    audio = AIFF(str(tagged_aiff))
+    if audio.tags is None:
+        audio.add_tags()
 
-    audio.delete(str(rendered_aiff))
-    audio.add(TIT2(encoding=3, text=final_title))
-    audio.add(TPE1(encoding=3, text=artist_value))
-    audio.add(TPE2(encoding=3, text=album_artist_value))
-    audio.add(TALB(encoding=3, text=album_value))
-    audio.add(TCON(encoding=3, text=genre_value))
+    tags = audio.tags
+    tags.clear()
+    tags.add(TIT2(encoding=3, text=final_title))
+    tags.add(TPE1(encoding=3, text=artist_value))
+    tags.add(TPE2(encoding=3, text=album_artist_value))
+    tags.add(TALB(encoding=3, text=album_value))
+    tags.add(TCON(encoding=3, text=genre_value))
     if year_value:
-        audio.add(TDRC(encoding=3, text=year_value))
+        tags.add(TDRC(encoding=3, text=year_value))
     if essentia_comment:
-        audio.add(COMM(encoding=3, lang="eng", desc="", text=essentia_comment))
+        tags.add(COMM(encoding=3, lang="eng", desc="", text=essentia_comment))
 
-    audio.save(str(rendered_aiff), v2_version=3)
+    audio.save()
 
-    print("[DONE] Write tags to processed AIFF")
+    print("[DONE] Write tags to tagged AIFF")
     return result_tags
 
 
@@ -519,6 +540,9 @@ def run_flow(
             print("\nFlow complete.")
             return
 
+        tagged_aiff = copy_to_tagged(rendered_aiff, paths.tagged_aiff, dry_run=dry_run)
+        maybe_confirm(confirm_steps, "After copying to tagged files")
+
         essentia_json = run_essentia_single(
             rendered_file=rendered_aiff,
             logs_dir=paths.logs,
@@ -537,19 +561,19 @@ def run_flow(
         )
         print(f"[INFO] Metadata match source: {metadata_match.source}")
 
-        processed_tags = write_tags_to_processed_aiff(
-            rendered_aiff,
+        processed_tags = write_tags_to_tagged_aiff(
+            tagged_aiff,
             source_tags=source_tags,
             metadata_entry=metadata_match.entry,
             essentia_comment=essentia_comment,
             default_genre=default_genre,
             dry_run=dry_run,
         )
-        maybe_confirm(confirm_steps, "After writing processed AIFF tags")
+        maybe_confirm(confirm_steps, "After writing tagged AIFF tags")
 
         print(
             "[INFO] Audio processing summary: "
-            f"converted='{converted_aiff.name}', rendered='{rendered_aiff.name}'"
+            f"converted='{converted_aiff.name}', rendered='{rendered_aiff.name}', tagged='{tagged_aiff.name}'"
         )
         print(f"[INFO] essentia='{essentia_json.name}'")
 
@@ -563,6 +587,7 @@ def run_flow(
                 "converted_aiff": str(converted_aiff),
                 "template_input": str(paths.templates / "input.aif"),
                 "processed_aiff": str(rendered_aiff),
+                "tagged_aiff": str(tagged_aiff),
                 "essentia_json": str(essentia_json),
                 "metadata_match_source": metadata_match.source,
                 "metadata_entry": {
@@ -596,7 +621,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional source audio directory. Default: SourceFiles under prep root.",
     )
-    parser.add_argument("--ffmpeg-exe", default="ffmpeg")
+    parser.add_argument("--ffmpeg-exe", default=str(DEFAULT_FFMPEG_EXE))
     parser.add_argument("--reaper-exe", type=Path, default=DEFAULT_REAPER_EXE)
     parser.add_argument(
         "--reaper-project",

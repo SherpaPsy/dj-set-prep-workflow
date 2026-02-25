@@ -95,6 +95,7 @@ C:\Users\sherp\OneDrive\Music\DJ-Set-Prep
 │   ├── raw-track-metadata.txt
 │   └── processed-track-metadata.txt
 ├── ProcessedFiles
+├── TaggedFiles
 ├── SourceFiles
 └── Templates
 ```
@@ -109,8 +110,9 @@ What it does:
 	- copies converted file to `Templates/input.aif`,
 	- runs Reaper render project (`Templates/DJ Set Prep.rpp`),
 	- renames `ProcessedFiles/output.aif` to `ProcessedFiles/<filename>.aif`,
+	- copies `ProcessedFiles/<filename>.aif` to `TaggedFiles/<filename>.aif`,
 	- runs Essentia and writes JSON/logs to `Logs`,
-	- updates destination tags on rendered AIFF (title append from metadata line 3, Essentia comment, album artist, year/genre) using ID3v2.3.
+	- updates destination tags on tagged AIFF (title append from metadata line 3, Essentia comment, album artist, year/genre).
 4. Writes full per-track output to `Metadata/processed-track-metadata.txt`.
 
 You can enable optional interactive pauses after each stage in dry or non-dry mode:
