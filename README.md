@@ -38,12 +38,12 @@ Optional separator line every few tracks:
 
 Default source MP3 folder:
 
-`C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\Sourcefiles`
+`C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\SourceFiles`
 
 Global config variables in `src/dj_set_prep_workflow/tag_set_mp3s.py`:
 
 - `YEAR = 2026`
-- `MP3_SOURCE = C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\Sourcefiles`
+- `MP3_SOURCE = C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\SourceFiles`
 - `INIT_TARGET_PATH = C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\Metadata`
 
 ### Run
@@ -89,28 +89,28 @@ Expected root directory structure:
 ```text
 C:\Users\sherp\OneDrive\Music\DJ-Set-Prep
 ├── Artwork
-├── ConvertedAIFF
+├── ConvertedFiles
 ├── Logs
 ├── Metadata
 │   ├── raw-track-metadata.txt
 │   └── processed-track-metadata.txt
-├── ProcessedAIFF
-├── Sourcefiles
+├── ProcessedFiles
+├── SourceFiles
 └── Templates
 ```
 
 What it does:
 
-1. Lists source audio files from `Sourcefiles` (mp3/wav/aif/aiff/flac/m4a).
+1. Lists source audio files from `SourceFiles` (mp3/wav/aif/aiff/flac/m4a).
 2. Processes each source file one-by-one.
 3. For each file:
 	- extracts existing tags into a dictionary (including path/name/stem),
-	- converts to 24-bit AIFF in `ConvertedAIFF`,
-	- copies converted file to `Templates/input.aiff`,
+	- converts to 24-bit AIFF in `ConvertedFiles`,
+	- copies converted file to `Templates/input.aif`,
 	- runs Reaper render project (`Templates/DJ Set Prep.rpp`),
-	- renames `ProcessedAIFF/output.aif` to `ProcessedAIFF/<filename>.aif`,
+	- renames `ProcessedFiles/output.aif` to `ProcessedFiles/<filename>.aif`,
 	- runs Essentia and writes JSON/logs to `Logs`,
-	- updates destination tags on rendered AIFF (title append from metadata line 3, Essentia comment, album artist, year/genre).
+	- updates destination tags on rendered AIFF (title append from metadata line 3, Essentia comment, album artist, year/genre) using ID3v2.3.
 4. Writes full per-track output to `Metadata/processed-track-metadata.txt`.
 
 You can enable optional interactive pauses after each stage in dry or non-dry mode:

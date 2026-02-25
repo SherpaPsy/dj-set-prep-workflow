@@ -10,8 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from mutagen import File as MutagenFile
-from mutagen.aiff import AIFF
-from mutagen.id3 import COMM, ID3, TALB, TCON, TIT2, TPE1, TPE2, TDRC
+from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TCON, TDRC, COMM
 
 from .tag_set_mp3s import TrackEntry, normalize, parse_set_file
 
@@ -49,11 +48,11 @@ def build_prep_paths(prep_root: Path) -> PrepPaths:
     return PrepPaths(
         root=prep_root,
         artwork=prep_root / "Artwork",
-        converted_aiff=prep_root / "ConvertedAIFF",
+        converted_aiff=prep_root / "ConvertedFiles",
         logs=prep_root / "Logs",
         metadata=metadata_dir,
-        processed_aiff=prep_root / "ProcessedAIFF",
-        source_files=prep_root / "Sourcefiles",
+        processed_aiff=prep_root / "ProcessedFiles",
+        source_files=prep_root / "SourceFiles",
         templates=prep_root / "Templates",
         raw_metadata_file=metadata_dir / "raw-track-metadata.txt",
         processed_metadata_file=metadata_dir / "processed-track-metadata.txt",
@@ -160,7 +159,7 @@ def metadata_suffix(entry: TrackEntry | None) -> str | None:
 
 
 def convert_to_aiff(source_file: Path, converted_dir: Path, ffmpeg_exe: str, dry_run: bool) -> Path:
-    output_path = converted_dir / f"{source_file.stem}.aiff"
+    output_path = converted_dir / f"{source_file.stem}.aif"
     cmd = [ffmpeg_exe, "-y", "-i", str(source_file), "-c:a", "pcm_s24be", str(output_path)]
     print(f"[START] Convert -> {output_path.name}")
     if dry_run:
@@ -173,7 +172,7 @@ def convert_to_aiff(source_file: Path, converted_dir: Path, ffmpeg_exe: str, dry
 
 
 def copy_to_template_input(converted_aiff: Path, templates_dir: Path, dry_run: bool) -> Path:
-    template_input = templates_dir / "input.aiff"
+    template_input = templates_dir / "input.aif"
     print(f"[START] Copy to template input -> {template_input}")
     if dry_run:
         print(f"[DRY-RUN] copy: {converted_aiff} -> {template_input}")
@@ -190,7 +189,7 @@ def run_reaper_render(
     file_stem: str,
     dry_run: bool,
 ) -> Path:
-    output_path = logs_dir.parent / "ProcessedAIFF" / "output.aif"
+    output_path = logs_dir.parent / "ProcessedFiles" / "output.aif"
     log_path = logs_dir / f"{file_stem}.reaper.log"
     cmd = [str(reaper_exe), "-renderproject", str(reaper_project)]
 
@@ -363,14 +362,15 @@ def extract_essentia_summary(json_path: Path) -> str:
     if not chords_text and (chords_key or chords_scale):
         chords_text = "unknown"
 
-    parts = [
-        f"bpm={bpm_text}" if bpm_text else None,
-        f"key={key_text}" if key_text else None,
-        f"chords={chords_text}" if chords_text else None,
-        f"energy={energy_text}" if energy_text else None,
-    ]
-    filtered = [part for part in parts if part]
-    return "essentia:" + (";".join(filtered) if filtered else "no-summary")
+    parts = []
+    if key_text:
+        parts.append(f"Key: {key_text}")
+    if chords_text:
+        parts.append(f"Chords: {chords_text}")
+    if energy_text:
+        parts.append(f"Energy: {energy_text}")
+    
+    return " ".join(parts) if parts else ""
 
 
 def write_tags_to_processed_aiff(
@@ -396,15 +396,15 @@ def write_tags_to_processed_aiff(
     album_value = str((source_tags.get("album") or ["DJ Set Prep"])[0]).strip() or "DJ Set Prep"
 
     result_tags: dict[str, list[str]] = {
-        "TIT2": [final_title],
-        "TPE1": [artist_value],
-        "TPE2": [album_artist_value],
-        "TCON": [genre_value],
-        "TALB": [album_value],
-        "COMM:essentia": [essentia_comment],
+        "title": [final_title],
+        "artist": [artist_value],
+        "albumartist": [album_artist_value],
+        "album": [album_value],
+        "genre": [genre_value],
+        "comment": [essentia_comment],
     }
     if year_value:
-        result_tags["TDRC"] = [year_value]
+        result_tags["date"] = [year_value]
 
     print("[START] Write tags to processed AIFF")
     if dry_run:
@@ -412,28 +412,23 @@ def write_tags_to_processed_aiff(
         print("[DONE] Write tags to processed AIFF")
         return result_tags
 
-    audio = AIFF(rendered_aiff)
-    tags = audio.tags
-    if tags is None:
-        tags = ID3()
-        audio.tags = tags
+    try:
+        audio = ID3(str(rendered_aiff))
+    except Exception:
+        audio = ID3()
 
-    tags.setall("TIT2", [TIT2(encoding=3, text=[final_title])])
-    tags.setall("TPE1", [TPE1(encoding=3, text=[artist_value])])
-    tags.setall("TPE2", [TPE2(encoding=3, text=[album_artist_value])])
+    audio.delete(str(rendered_aiff))
+    audio.add(TIT2(encoding=3, text=final_title))
+    audio.add(TPE1(encoding=3, text=artist_value))
+    audio.add(TPE2(encoding=3, text=album_artist_value))
+    audio.add(TALB(encoding=3, text=album_value))
+    audio.add(TCON(encoding=3, text=genre_value))
+    if year_value:
+        audio.add(TDRC(encoding=3, text=year_value))
+    if essentia_comment:
+        audio.add(COMM(encoding=3, lang="eng", desc="", text=essentia_comment))
 
-    if year_value and not tags.get("TDRC"):
-        tags.setall("TDRC", [TDRC(encoding=3, text=[year_value])])
-
-    if not tags.get("TCON"):
-        tags.setall("TCON", [TCON(encoding=3, text=[genre_value])])
-
-    if not tags.get("TALB"):
-        tags.setall("TALB", [TALB(encoding=3, text=[album_value])])
-
-    tags.delall("COMM")
-    tags.add(COMM(encoding=3, lang="eng", desc="essentia", text=[essentia_comment]))
-    tags.save(rendered_aiff)
+    audio.save(str(rendered_aiff), v2_version=3)
 
     print("[DONE] Write tags to processed AIFF")
     return result_tags
@@ -461,6 +456,7 @@ def run_flow(
     max_tracks: int | None,
     dry_run: bool,
     confirm_steps: bool,
+    stop_after_render: bool,
 ) -> None:
     paths = build_prep_paths(prep_root)
     ensure_dirs(paths)
@@ -504,7 +500,7 @@ def run_flow(
         maybe_confirm(confirm_steps, "After conversion to AIFF")
 
         copy_to_template_input(converted_aiff, paths.templates, dry_run=dry_run)
-        maybe_confirm(confirm_steps, "After copying template input.aiff")
+        maybe_confirm(confirm_steps, "After copying template input.aif")
 
         run_reaper_render(
             reaper_exe=reaper_exe,
@@ -517,6 +513,11 @@ def run_flow(
 
         rendered_aiff = rename_render_output(paths.processed_aiff, target_stem=source_file.stem, dry_run=dry_run)
         maybe_confirm(confirm_steps, "After renaming rendered output")
+
+        if stop_after_render:
+            print("[INFO] Stop-after-render enabled. Skipping Essentia, tagging, and metadata output.")
+            print("\nFlow complete.")
+            return
 
         essentia_json = run_essentia_single(
             rendered_file=rendered_aiff,
@@ -560,7 +561,7 @@ def run_flow(
                     "file_stem": source_file.stem,
                 },
                 "converted_aiff": str(converted_aiff),
-                "template_input": str(paths.templates / "input.aiff"),
+                "template_input": str(paths.templates / "input.aif"),
                 "processed_aiff": str(rendered_aiff),
                 "essentia_json": str(essentia_json),
                 "metadata_match_source": metadata_match.source,
@@ -593,7 +594,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--source-dir",
         type=Path,
         default=None,
-        help="Optional source audio directory. Default: Sourcefiles under prep root.",
+        help="Optional source audio directory. Default: SourceFiles under prep root.",
     )
     parser.add_argument("--ffmpeg-exe", default="ffmpeg")
     parser.add_argument("--reaper-exe", type=Path, default=DEFAULT_REAPER_EXE)
@@ -607,6 +608,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--default-genre", default="Electronic")
     parser.add_argument("--max-tracks", type=int, default=None)
     parser.add_argument("--confirm-steps", action="store_true", help="Pause for confirmation after each stage.")
+    parser.add_argument(
+        "--stop-after-render",
+        action="store_true",
+        help="Exit after render stage (skip Essentia, tagging, and processed metadata file).",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -627,6 +633,7 @@ def main() -> None:
         max_tracks=args.max_tracks,
         dry_run=args.dry_run,
         confirm_steps=args.confirm_steps,
+        stop_after_render=args.stop_after_render,
     )
 
 
