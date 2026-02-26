@@ -48,6 +48,21 @@ class MetadataMatch:
     source: str
 
 
+@dataclass(slots=True)
+class TrackProcessingData:
+    """Tracks all data for a single file through all processing stages."""
+    source_file: Path
+    source_tags: dict[str, Any] | None = None
+    cover_art_file: Path | None = None
+    converted_aiff: Path | None = None
+    rendered_aiff: Path | None = None
+    tagged_aiff: Path | None = None
+    essentia_json: Path | None = None
+    essentia_comment: str | None = None
+    metadata_match: MetadataMatch | None = None
+    processed_tags: dict[str, list[str]] | None = None
+
+
 def build_prep_paths(prep_root: Path, templates_root: Path) -> PrepPaths:
     metadata_dir = prep_root / "Metadata"
     return PrepPaths(
@@ -266,21 +281,40 @@ def metadata_suffix(entry: TrackEntry | None) -> str | None:
     return None
 
 
-def convert_to_aiff(source_file: Path, converted_dir: Path, ffmpeg_exe: str, dry_run: bool) -> Path:
+def convert_to_wav(source_file: Path, converted_dir: Path, ffmpeg_exe: str, dry_run: bool) -> Path:
     resolved_ffmpeg = shutil.which(ffmpeg_exe) if ffmpeg_exe else None
     if not resolved_ffmpeg:
         raise FileNotFoundError(
             "ffmpeg executable not found. Provide --ffmpeg-exe with a full path or add ffmpeg to PATH."
         )
-    output_path = converted_dir / f"{source_file.stem}.aif"
-    cmd = [resolved_ffmpeg, "-y", "-i", str(source_file), "-c:a", "pcm_s24be", str(output_path)]
+    output_path = converted_dir / f"{source_file.stem}.wav"
+    cmd = [resolved_ffmpeg, "-y", "-i", str(source_file), "-c:a", "pcm_s24le", str(output_path)]
     print(f"[START] Convert -> {output_path.name}")
     if dry_run:
         print(f"[DRY-RUN] ffmpeg: {' '.join(cmd)}")
     else:
         subprocess.run(cmd, check=True)
-    print(f"[INFO] Converted AIFF: {output_path}")
+    print(f"[INFO] Converted WAV: {output_path}")
     print("[DONE] Convert")
+    return output_path
+
+
+def convert_wav_to_aiff(wav_file: Path, aiff_dir: Path, ffmpeg_exe: str, dry_run: bool) -> Path:
+    """Convert WAV file to AIFF format."""
+    resolved_ffmpeg = shutil.which(ffmpeg_exe) if ffmpeg_exe else None
+    if not resolved_ffmpeg:
+        raise FileNotFoundError(
+            "ffmpeg executable not found. Provide --ffmpeg-exe with a full path or add ffmpeg to PATH."
+        )
+    output_path = aiff_dir / f"{wav_file.stem}.aif"
+    cmd = [resolved_ffmpeg, "-y", "-i", str(wav_file), "-c:a", "pcm_s24be", str(output_path)]
+    print(f"[START] Convert WAV to AIFF -> {output_path.name}")
+    if dry_run:
+        print(f"[DRY-RUN] ffmpeg: {' '.join(cmd)}")
+    else:
+        subprocess.run(cmd, check=True)
+    print(f"[INFO] Converted to AIFF: {output_path}")
+    print("[DONE] Convert WAV to AIFF")
     return output_path
 
 
@@ -358,6 +392,123 @@ def move_render_output(templates_dir: Path, processed_dir: Path, target_stem: st
     print(f"[INFO] Rendered AIFF: {dst}")
     print("[DONE] Move render output")
     return dst
+
+
+def build_batch_convert_file(
+    converted_aiffs: list[Path],
+    template_file: Path,
+    output_file: Path,
+    dry_run: bool,
+) -> Path:
+    """Build a Reaper batch convert file by prepending input files to the template."""
+    print("[START] Build batch convert file")
+    
+    if not template_file.exists():
+        raise FileNotFoundError(f"Batch convert template not found: {template_file}")
+    
+    print(f"[INFO] Batch template path: {template_file}")
+
+    # Read template content
+    template_content = template_file.read_text(encoding="utf-8")
+
+    template_fxchain = next(
+        (line for line in template_content.splitlines() if line.startswith("FXCHAIN ")),
+        None,
+    )
+    if template_fxchain:
+        print(f"[INFO] Template FXCHAIN: {template_fxchain}")
+    if "DJ-Pre-Master.RfxChain" not in template_content:
+        raise RuntimeError(
+            "Template does not contain expected FXCHAIN line 'DJ-Pre-Master.RfxChain'. "
+            "Save the template file and re-run."
+        )
+    
+    print(f"[INFO] Template content length: {len(template_content)} bytes")
+    
+    # Build the file list (full paths, one per line)
+    file_list_lines = [str(aiff) for aiff in converted_aiffs]
+    file_list = "\n".join(file_list_lines)
+    
+    # Assemble final content: files + newline + template (unchanged)
+    final_content = file_list + ("\n" if file_list else "") + template_content
+    
+    if dry_run:
+        print(f"[DRY-RUN] Would write batch convert file to: {output_file}")
+        print(f"[DRY-RUN] Files to process: {len(converted_aiffs)}")
+        for aiff in converted_aiffs:
+            print(f"[DRY-RUN]   - {aiff}")
+        print(f"[DRY-RUN] Content preview (first 500 chars):\n{final_content[:500]}")
+        print(f"[DRY-RUN] Content length: {len(final_content)} bytes")
+    else:
+        # Always regenerate the batch file
+        if output_file.exists():
+            output_file.unlink()
+        output_file.write_text(final_content, encoding="utf-8")
+        
+        print(f"[INFO] Batch convert file created: {output_file}")
+        print(f"[INFO] Files to process: {len(converted_aiffs)}")
+        for aiff in converted_aiffs:
+            print(f"[INFO]   - {aiff}")
+        print(f"[INFO] File size: {output_file.stat().st_size} bytes")
+        
+        # Verify what we wrote
+        verify_content = output_file.read_text(encoding="utf-8")
+        if not verify_content.endswith(template_content):
+            raise RuntimeError(
+                "batchconvert.txt config block does not match the template file. "
+                "The template content must be copied verbatim after the file list."
+            )
+    
+    print("[DONE] Build batch convert file")
+    return output_file
+
+
+def run_reaper_batch_convert(
+    reaper_exe: Path,
+    batch_file: Path,
+    logs_dir: Path,
+    processed_dir: Path,
+    templates_dir: Path,
+    dry_run: bool,
+) -> None:
+    """Run Reaper batch convert on all files and validate results."""
+    log_path = templates_dir / "batchconvert.txt.log"
+    cmd = [str(reaper_exe), "-batchconvert", str(batch_file)]
+    
+    print("[START] Reaper batch convert")
+    print(f"[INFO] Batch file: {batch_file}")
+    
+    if dry_run:
+        print(f"[DRY-RUN] Reaper: {' '.join(cmd)}")
+    else:
+        print("[INFO] Reaper batch processing started (this step can be slow)...")
+        started = time.monotonic()
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        
+        while process.poll() is None:
+            elapsed = int(time.monotonic() - started)
+            print(f"[INFO] Reaper batch convert still running... {elapsed}s")
+            time.sleep(5)
+        
+        stdout, stderr = process.communicate()
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, cmd, output=stdout, stderr=stderr)
+        
+        # Check log for errors
+        if log_path.exists():
+            log_content = log_path.read_text(encoding="utf-8")
+            print(f"[INFO] Batch convert log contents:\n{log_content}")
+            if "FAIL" in log_content or "Can't open" in log_content or "ERROR" in log_content:
+                print("[ERROR] Batch convert failed! Log contents:")
+                print(log_content)
+                raise RuntimeError("Reaper batch convert reported errors. Check log for details.")
+        else:
+            raise FileNotFoundError(f"Expected Reaper batch log not found: {log_path}")
+        
+        elapsed = time.monotonic() - started
+        print(f"[INFO] Reaper batch convert duration: {elapsed:.1f}s")
+    
+    print("[DONE] Reaper batch convert")
 
 
 def copy_to_tagged(rendered_aiff: Path, tagged_dir: Path, dry_run: bool) -> Path:
@@ -578,6 +729,214 @@ def write_processed_metadata(records: list[dict[str, Any]], output_file: Path, d
     print("[DONE] Write processed metadata file")
 
 
+def stage1_extract_all(
+    tracks: list[TrackProcessingData],
+    paths: PrepPaths,
+    dry_run: bool,
+    confirm_steps: bool,
+) -> None:
+    """Stage 1: Extract tags and cover art from all source files."""
+    print("\n" + "=" * 80)
+    print("STAGE 1: EXTRACT METADATA AND COVER ART")
+    print("=" * 80)
+    
+    for idx, track in enumerate(tracks, start=1):
+        print(f"\n[{idx}/{len(tracks)}] Extracting from {track.source_file.name}")
+        
+        track.source_tags = extract_tags_dict(track.source_file)
+        print("[INFO] Extracted tags dictionary:")
+        print(json.dumps(track.source_tags, ensure_ascii=False, indent=2))
+        
+        track.cover_art_file = extract_cover_art(track.source_file, paths.coverart, dry_run=dry_run)
+    
+    maybe_confirm(confirm_steps, "After Stage 1: Extract all metadata and cover art")
+
+
+def stage2_convert_all(
+    tracks: list[TrackProcessingData],
+    paths: PrepPaths,
+    ffmpeg_exe: str,
+    dry_run: bool,
+    confirm_steps: bool,
+) -> None:
+    """Stage 2: Convert all source files to WAV."""
+    print("\n" + "=" * 80)
+    print("STAGE 2: CONVERT ALL FILES TO WAV")
+    print("=" * 80)
+    
+    for idx, track in enumerate(tracks, start=1):
+        print(f"\n[{idx}/{len(tracks)}] Converting {track.source_file.name}")
+        track.converted_aiff = convert_to_wav(
+            track.source_file, 
+            paths.converted_aiff, 
+            ffmpeg_exe=ffmpeg_exe, 
+            dry_run=dry_run
+        )
+    
+    maybe_confirm(confirm_steps, "After Stage 2: Convert all to WAV")
+
+
+def stage3_render_all(
+    tracks: list[TrackProcessingData],
+    paths: PrepPaths,
+    reaper_exe: Path,
+    reaper_project: Path,
+    dry_run: bool,
+    confirm_steps: bool,
+) -> None:
+    """Stage 3: Batch convert all WAV files through Reaper."""
+    print("\n" + "=" * 80)
+    print("STAGE 3: BATCH CONVERT ALL FILES THROUGH REAPER")
+    print("=" * 80)
+    
+    # Gather all converted WAV files (only .wav files)
+    converted_wavs = [track.converted_aiff for track in tracks if track.converted_aiff.suffix.lower() == ".wav"]
+    
+    if not converted_wavs:
+        raise ValueError("No .wav files found in converted files")
+    
+    # Build batch convert file in Templates directory
+    batch_template = paths.templates / "batchconvert_template.txt"
+    batch_file = paths.templates / "batchconvert.txt"
+    
+    build_batch_convert_file(
+        converted_aiffs=converted_wavs,
+        template_file=batch_template,
+        output_file=batch_file,
+        dry_run=dry_run,
+    )
+    
+    # Run batch convert
+    run_reaper_batch_convert(
+        reaper_exe=reaper_exe,
+        batch_file=batch_file,
+        logs_dir=paths.logs,
+        processed_dir=paths.processed_aiff,
+        templates_dir=paths.templates,
+        dry_run=dry_run,
+    )
+    
+    # Set the rendered_wav paths for each track (Reaper will output WAV)
+    # Log validation in run_reaper_batch_convert handles error detection
+    print("\n[INFO] Setting rendered WAV file paths for next stage...")
+    for track in tracks:
+        track.rendered_aiff = paths.processed_aiff / f"{track.source_file.stem}.wav"
+        print(f"[INFO] Track will use: {track.rendered_aiff.name}")
+    
+    maybe_confirm(confirm_steps, "After Stage 3: Batch convert all through Reaper")
+
+
+def stage3b_convert_to_aiff(
+    tracks: list[TrackProcessingData],
+    paths: PrepPaths,
+    ffmpeg_exe: str,
+    dry_run: bool,
+    confirm_steps: bool,
+) -> None:
+    """Stage 3b: Convert WAV files from batch convert back to AIFF for analysis."""
+    print("\n" + "=" * 80)
+    print("STAGE 3B: CONVERT WAV TO AIFF FOR ANALYSIS")
+    print("=" * 80)
+    
+    for idx, track in enumerate(tracks, 1):
+        print(f"\n[{idx}/{len(tracks)}] Converting WAV to AIFF: {track.source_file.name}")
+        
+        # rendered_aiff currently holds the WAV file path from batch convert
+        wav_file = track.rendered_aiff
+        
+        if not wav_file.exists():
+            raise FileNotFoundError(f"Batch convert WAV not found: {wav_file}")
+        
+        # Convert to AIFF
+        aiff_file = convert_wav_to_aiff(
+            wav_file=wav_file,
+            aiff_dir=paths.processed_aiff,
+            ffmpeg_exe=ffmpeg_exe,
+            dry_run=dry_run,
+        )
+        
+        # Update track to point to AIFF for analysis stage
+        track.rendered_aiff = aiff_file
+    
+    maybe_confirm(confirm_steps, "After Stage 3b: Convert WAV to AIFF for analysis")
+
+
+def stage4_analyze_all(
+    tracks: list[TrackProcessingData],
+    paths: PrepPaths,
+    essentia_exe: Path,
+    dry_run: bool,
+    confirm_steps: bool,
+) -> None:
+    """Stage 4: Analyze all rendered files with Essentia."""
+    print("\n" + "=" * 80)
+    print("STAGE 4: ANALYZE ALL FILES WITH ESSENTIA")
+    print("=" * 80)
+    
+    for idx, track in enumerate(tracks, start=1):
+        print(f"\n[{idx}/{len(tracks)}] Analyzing {track.rendered_aiff.name}")
+        
+        track.essentia_json = run_essentia_single(
+            rendered_file=track.rendered_aiff,
+            logs_dir=paths.logs,
+            essentia_exe=essentia_exe,
+            dry_run=dry_run,
+        )
+        
+        track.essentia_comment = extract_essentia_summary(track.essentia_json)
+        print(f"[INFO] Essentia comment: {track.essentia_comment}")
+    
+    maybe_confirm(confirm_steps, "After Stage 4: Analyze all with Essentia")
+
+
+def stage5_tag_all(
+    tracks: list[TrackProcessingData],
+    paths: PrepPaths,
+    metadata_entries: list[TrackEntry],
+    default_genre: str,
+    dry_run: bool,
+    confirm_steps: bool,
+) -> None:
+    """Stage 5: Tag all files and embed cover art."""
+    print("\n" + "=" * 80)
+    print("STAGE 5: TAG ALL FILES AND EMBED COVER ART")
+    print("=" * 80)
+    
+    used_entry_indices: set[int] = set()
+    
+    for idx, track in enumerate(tracks, start=1):
+        print(f"\n[{idx}/{len(tracks)}] Tagging {track.rendered_aiff.name}")
+        
+        track.tagged_aiff = copy_to_tagged(track.rendered_aiff, paths.tagged_aiff, dry_run=dry_run)
+        
+        track.metadata_match = find_metadata_match(
+            metadata_entries,
+            source_tags=track.source_tags,
+            used_entry_indices=used_entry_indices,
+            fallback_index=idx - 1,
+        )
+        print(f"[INFO] Metadata match source: {track.metadata_match.source}")
+        
+        track.processed_tags = write_tags_to_tagged_aiff(
+            track.tagged_aiff,
+            source_tags=track.source_tags,
+            metadata_entry=track.metadata_match.entry,
+            essentia_comment=track.essentia_comment,
+            default_genre=default_genre,
+            dry_run=dry_run,
+        )
+        
+        embed_cover_art(track.tagged_aiff, track.cover_art_file, dry_run=dry_run)
+        
+        print(
+            "[INFO] Audio processing summary: "
+            f"converted='{track.converted_aiff.name}', rendered='{track.rendered_aiff.name}', tagged='{track.tagged_aiff.name}'"
+        )
+        print(f"[INFO] essentia='{track.essentia_json.name}'")
+    
+    maybe_confirm(confirm_steps, "After Stage 5: Tag all and embed cover art")
+
+
 def run_flow(
     prep_root: Path,
     templates_root: Path,
@@ -619,112 +978,91 @@ def run_flow(
     print(f"Metadata file: {resolved_set_file}")
     print(f"Reaper project: {resolved_reaper_project}")
     print(f"Source files discovered: {len(source_files)}")
+    print(f"\nProcessing mode: STAGE-BASED (extract all → convert to WAV → batch render → convert to AIFF → analyze all → tag all)")
 
+
+    # Initialize track data structures
+    tracks = [TrackProcessingData(source_file=sf) for sf in source_files]
+
+    # Stage 1: Extract metadata and cover art from all files
+    stage1_extract_all(tracks, paths, dry_run=dry_run, confirm_steps=confirm_steps)
+
+    # Stage 2: Convert all files to AIFF
+    stage2_convert_all(tracks, paths, ffmpeg_exe=ffmpeg_exe, dry_run=dry_run, confirm_steps=confirm_steps)
+
+    # Stage 3: Render all files through Reaper
+    stage3_render_all(
+        tracks, 
+        paths, 
+        reaper_exe=reaper_exe, 
+        reaper_project=resolved_reaper_project, 
+        dry_run=dry_run, 
+        confirm_steps=confirm_steps
+    )
+
+    # Stage 3b: Convert WAV output from batch convert back to AIFF
+    stage3b_convert_to_aiff(
+        tracks,
+        paths,
+        ffmpeg_exe=ffmpeg_exe,
+        dry_run=dry_run,
+        confirm_steps=confirm_steps,
+    )
+
+    if stop_after_render:
+        print("\n[INFO] Stop-after-render enabled. Skipping Essentia, tagging, and metadata output.")
+        print("\nFlow complete.")
+        return
+
+    # Stage 4: Analyze all files with Essentia
+    stage4_analyze_all(tracks, paths, essentia_exe=essentia_exe, dry_run=dry_run, confirm_steps=confirm_steps)
+
+    # Stage 5: Tag all files and embed cover art
+    stage5_tag_all(
+        tracks, 
+        paths, 
+        metadata_entries=metadata_entries, 
+        default_genre=default_genre, 
+        dry_run=dry_run, 
+        confirm_steps=confirm_steps
+    )
+
+    # Build processed records for output
     processed_records: list[dict[str, Any]] = []
-    used_entry_indices: set[int] = set()
-
-    for idx, source_file in enumerate(source_files, start=1):
-        print(f"\n=== [{idx}/{len(source_files)}] Processing {source_file.name} ===")
-
-        source_tags = extract_tags_dict(source_file)
-        print("[INFO] Extracted tags dictionary:")
-        print(json.dumps(source_tags, ensure_ascii=False, indent=2))
-        maybe_confirm(confirm_steps, "After tag extraction")
-
-        cover_art_file = extract_cover_art(source_file, paths.coverart, dry_run=dry_run)
-        maybe_confirm(confirm_steps, "After cover art extraction")
-
-        converted_aiff = convert_to_aiff(source_file, paths.converted_aiff, ffmpeg_exe=ffmpeg_exe, dry_run=dry_run)
-        maybe_confirm(confirm_steps, "After conversion to AIFF")
-
-        copy_to_template_input(converted_aiff, paths.templates, dry_run=dry_run)
-        maybe_confirm(confirm_steps, "After copying template input.aif")
-
-        run_reaper_render(
-            reaper_exe=reaper_exe,
-            reaper_project=resolved_reaper_project,
-            templates_dir=paths.templates,
-            logs_dir=paths.logs,
-            file_stem=source_file.stem,
-            dry_run=dry_run,
-        )
-        maybe_confirm(confirm_steps, "After Reaper render")
-
-        rendered_aiff = move_render_output(paths.templates, paths.processed_aiff, target_stem=source_file.stem, dry_run=dry_run)
-        maybe_confirm(confirm_steps, "After moving rendered output")
-
-        if stop_after_render:
-            print("[INFO] Stop-after-render enabled. Skipping Essentia, tagging, and metadata output.")
-            print("\nFlow complete.")
-            return
-
-        tagged_aiff = copy_to_tagged(rendered_aiff, paths.tagged_aiff, dry_run=dry_run)
-        maybe_confirm(confirm_steps, "After copying to tagged files")
-
-        essentia_json = run_essentia_single(
-            rendered_file=rendered_aiff,
-            logs_dir=paths.logs,
-            essentia_exe=essentia_exe,
-            dry_run=dry_run,
-        )
-        essentia_comment = extract_essentia_summary(essentia_json)
-        print(f"[INFO] Essentia comment: {essentia_comment}")
-        maybe_confirm(confirm_steps, "After Essentia extraction")
-
-        metadata_match = find_metadata_match(
-            metadata_entries,
-            source_tags=source_tags,
-            used_entry_indices=used_entry_indices,
-            fallback_index=idx - 1,
-        )
-        print(f"[INFO] Metadata match source: {metadata_match.source}")
-
-        processed_tags = write_tags_to_tagged_aiff(
-            tagged_aiff,
-            source_tags=source_tags,
-            metadata_entry=metadata_match.entry,
-            essentia_comment=essentia_comment,
-            default_genre=default_genre,
-            dry_run=dry_run,
-        )
-        maybe_confirm(confirm_steps, "After writing tagged AIFF tags")
-
-        embed_cover_art(tagged_aiff, cover_art_file, dry_run=dry_run)
-        maybe_confirm(confirm_steps, "After embedding cover art")
-
-        print(
-            "[INFO] Audio processing summary: "
-            f"converted='{converted_aiff.name}', rendered='{rendered_aiff.name}', tagged='{tagged_aiff.name}'"
-        )
-        print(f"[INFO] essentia='{essentia_json.name}'")
-
+    for track in tracks:
         processed_records.append(
             {
                 "source": {
-                    "full_path": str(source_file),
-                    "file_name": source_file.name,
-                    "file_stem": source_file.stem,
+                    "full_path": str(track.source_file),
+                    "file_name": track.source_file.name,
+                    "file_stem": track.source_file.stem,
                 },
-                "converted_aiff": str(converted_aiff),
+                "converted_aiff": str(track.converted_aiff),
                 "template_input": str(paths.templates / "input.aif"),
-                "processed_aiff": str(rendered_aiff),
-                "tagged_aiff": str(tagged_aiff),
-                "cover_art_file": str(cover_art_file) if cover_art_file else None,
-                "essentia_json": str(essentia_json),
-                "metadata_match_source": metadata_match.source,
+                "processed_aiff": str(track.rendered_aiff),
+                "tagged_aiff": str(track.tagged_aiff),
+                "cover_art_file": str(track.cover_art_file) if track.cover_art_file else None,
+                "essentia_json": str(track.essentia_json),
+                "metadata_match_source": track.metadata_match.source if track.metadata_match else "none",
                 "metadata_entry": {
-                    "title": metadata_match.entry.title if metadata_match.entry else None,
-                    "artist": metadata_match.entry.artist if metadata_match.entry else None,
-                    "label": metadata_match.entry.label if metadata_match.entry else None,
-                    "year": metadata_match.entry.year if metadata_match.entry else None,
+                    "title": track.metadata_match.entry.title if track.metadata_match and track.metadata_match.entry else None,
+                    "artist": track.metadata_match.entry.artist if track.metadata_match and track.metadata_match.entry else None,
+                    "label": track.metadata_match.entry.label if track.metadata_match and track.metadata_match.entry else None,
+                    "year": track.metadata_match.entry.year if track.metadata_match and track.metadata_match.entry else None,
                 },
-                "source_tags": source_tags,
-                "processed_tags": processed_tags,
-                "essentia_comment": essentia_comment,
+                "source_tags": track.source_tags,
+                "processed_tags": track.processed_tags,
+                "essentia_comment": track.essentia_comment,
             }
         )
 
     write_processed_metadata(processed_records, paths.processed_metadata_file, dry_run=dry_run)
+    
+    print("\n" + "=" * 80)
+    print("ALL STAGES COMPLETE")
+    print("=" * 80)
+    print(f"Total tracks processed: {len(tracks)}")
+    print(f"Processed metadata file: {paths.processed_metadata_file}")
     print("\nFlow complete.")
 
 
