@@ -11,11 +11,12 @@ from typing import Any
 
 from mutagen import File as MutagenFile
 from mutagen.aiff import AIFF
-from mutagen.id3 import ID3, COMM, TALB, TCON, TDRC, TIT2, TPE1, TPE2
+from mutagen.id3 import APIC, ID3, COMM, TALB, TCON, TDRC, TIT2, TPE1, TPE2
 
 from .tag_set_mp3s import TrackEntry, normalize, parse_set_file
 
 DEFAULT_PREP_ROOT = Path(r"C:\Users\sherp\OneDrive\Music\DJ-Set-Prep")
+DEFAULT_TEMPLATES_ROOT = Path(r"C:\Code\Personal\dj-set-prep-workflow\Templates")
 DEFAULT_REAPER_EXE = Path(r"C:\Program Files\REAPER (x64)\reaper.exe")
 DEFAULT_FFMPEG_EXE = Path(r"D:\AudioTools\ffmpeg\bin\ffmpeg.exe")
 DEFAULT_ESSENTIA_EXE = Path(
@@ -29,6 +30,7 @@ AUDIO_EXTENSIONS = {".mp3", ".wav", ".aif", ".aiff", ".flac", ".m4a"}
 class PrepPaths:
     root: Path
     artwork: Path
+    coverart: Path
     converted_aiff: Path
     logs: Path
     metadata: Path
@@ -46,18 +48,19 @@ class MetadataMatch:
     source: str
 
 
-def build_prep_paths(prep_root: Path) -> PrepPaths:
+def build_prep_paths(prep_root: Path, templates_root: Path) -> PrepPaths:
     metadata_dir = prep_root / "Metadata"
     return PrepPaths(
         root=prep_root,
         artwork=prep_root / "Artwork",
+        coverart=prep_root / "Coverart",
         converted_aiff=prep_root / "ConvertedFiles",
         logs=prep_root / "Logs",
         metadata=metadata_dir,
         processed_aiff=prep_root / "ProcessedFiles",
         tagged_aiff=prep_root / "TaggedFiles",
         source_files=prep_root / "SourceFiles",
-        templates=prep_root / "Templates",
+        templates=templates_root,
         raw_metadata_file=metadata_dir / "raw-track-metadata.txt",
         processed_metadata_file=metadata_dir / "processed-track-metadata.txt",
     )
@@ -67,6 +70,7 @@ def ensure_dirs(paths: PrepPaths) -> None:
     for directory in [
         paths.root,
         paths.artwork,
+        paths.coverart,
         paths.converted_aiff,
         paths.logs,
         paths.metadata,
@@ -110,6 +114,105 @@ def extract_tags_dict(audio_path: Path) -> dict[str, Any]:
                 data[key] = [str(values)]
 
     return data
+
+
+def extract_cover_art(audio_path: Path, coverart_dir: Path, dry_run: bool) -> Path | None:
+    """Extract cover art from audio file and save it to the coverart directory."""
+    print(f"[START] Extract cover art from {audio_path.name}")
+    
+    try:
+        audio = MutagenFile(str(audio_path))
+        if audio is None:
+            print("[INFO] No audio metadata found, skipping cover art extraction")
+            print("[DONE] Extract cover art")
+            return None
+        
+        cover_data = None
+        
+        # Try to extract cover art from ID3 tags (MP3)
+        if hasattr(audio, "tags") and audio.tags is not None:
+            if hasattr(audio.tags, "getall"):
+                # ID3 tags
+                for frame in audio.tags.getall("APIC"):
+                    if frame.type == 3 or (hasattr(frame, "type") and frame.type == 3):  # Front cover
+                        cover_data = frame.data
+                        break
+                # If no front cover, get the first APIC frame
+                if not cover_data:
+                    apic_frames = audio.tags.getall("APIC")
+                    if apic_frames:
+                        cover_data = apic_frames[0].data
+        
+        # Try MP4 style metadata
+        if not cover_data and hasattr(audio, "tags") and audio.tags is not None:
+            if "covr" in audio.tags:
+                cover_data = audio.tags["covr"][0] if audio.tags["covr"] else None
+        
+        if not cover_data:
+            print("[INFO] No cover art found in audio metadata")
+            print("[DONE] Extract cover art")
+            return None
+        
+        # Save cover art
+        cover_output = coverart_dir / f"{audio_path.stem}.jpg"
+        
+        if dry_run:
+            print(f"[DRY-RUN] Would save cover art to: {cover_output}")
+        else:
+            cover_output.write_bytes(cover_data)
+            print(f"[INFO] Cover art saved: {cover_output.name}")
+        
+        print("[DONE] Extract cover art")
+        return cover_output
+    
+    except Exception as e:
+        print(f"[WARNING] Error extracting cover art: {e}")
+        print("[DONE] Extract cover art")
+        return None
+
+
+def embed_cover_art(tagged_aiff: Path, coverart_file: Path, dry_run: bool) -> Path | None:
+    """Embed cover art into AIFF file using mutagen."""
+    if not coverart_file or not coverart_file.exists():
+        print("[INFO] Cover art file not found or None, skipping embedding")
+        return None
+    
+    print(f"[START] Embed cover art in {tagged_aiff.name}")
+    
+    try:
+        # Read cover art data
+        cover_data = coverart_file.read_bytes()
+        
+        if dry_run:
+            print(f"[DRY-RUN] Would embed {len(cover_data)} bytes of cover art into {tagged_aiff.name}")
+            print("[DONE] Embed cover art")
+            return None
+        
+        # Open AIFF file and add cover art to ID3 tags
+        audio = AIFF(str(tagged_aiff))
+        if audio.tags is None:
+            audio.add_tags()
+        
+        tags = audio.tags
+        
+        # Remove any existing picture frames
+        for key in list(tags.keys()):
+            if key.startswith("APIC"):
+                del tags[key]
+        
+        # Add the new picture frame
+        tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="", data=cover_data))
+        
+        audio.save()
+        
+        print(f"[INFO] Cover art embedded successfully in: {tagged_aiff.name}")
+        print("[DONE] Embed cover art")
+        return tagged_aiff
+    
+    except Exception as e:
+        print(f"[ERROR] Error embedding cover art: {e}")
+        print("[DONE] Embed cover art")
+        return None
 
 
 def append_suffix_to_title(title: str, suffix: str | None) -> str:
@@ -195,16 +298,26 @@ def copy_to_template_input(converted_aiff: Path, templates_dir: Path, dry_run: b
 def run_reaper_render(
     reaper_exe: Path,
     reaper_project: Path,
+    templates_dir: Path,
     logs_dir: Path,
     file_stem: str,
     dry_run: bool,
 ) -> Path:
-    output_path = logs_dir.parent / "ProcessedFiles" / "output.aif"
+    output_path = templates_dir / "output.aif"
     log_path = logs_dir / f"{file_stem}.reaper.log"
     cmd = [str(reaper_exe), "-renderproject", str(reaper_project)]
 
     print("[START] Reaper render")
     print(f"[INFO] Reaper project: {reaper_project}")
+    
+    # Delete old output file to ensure fresh render
+    if output_path.exists():
+        if dry_run:
+            print(f"[DRY-RUN] delete old output: {output_path}")
+        else:
+            output_path.unlink()
+            print(f"[INFO] Deleted old render output: {output_path}")
+    
     if dry_run:
         print(f"[DRY-RUN] Reaper: {' '.join(cmd)}")
         print(f"[DRY-RUN] Reaper expected output: {output_path}")
@@ -230,20 +343,20 @@ def run_reaper_render(
     return output_path
 
 
-def rename_render_output(processed_dir: Path, target_stem: str, dry_run: bool) -> Path:
-    src = processed_dir / "output.aif"
+def move_render_output(templates_dir: Path, processed_dir: Path, target_stem: str, dry_run: bool) -> Path:
+    src = templates_dir / "output.aif"
     dst = processed_dir / f"{target_stem}.aif"
-    print(f"[START] Rename render output -> {dst.name}")
+    print(f"[START] Move render output -> {dst.name}")
     if dry_run:
-        print(f"[DRY-RUN] rename: {src} -> {dst}")
+        print(f"[DRY-RUN] move: {src} -> {dst}")
     else:
         if not src.exists():
             raise FileNotFoundError(f"Expected Reaper output not found: {src}")
         if dst.exists():
             dst.unlink()
-        src.rename(dst)
+        shutil.move(str(src), str(dst))
     print(f"[INFO] Rendered AIFF: {dst}")
-    print("[DONE] Rename render output")
+    print("[DONE] Move render output")
     return dst
 
 
@@ -467,6 +580,7 @@ def write_processed_metadata(records: list[dict[str, Any]], output_file: Path, d
 
 def run_flow(
     prep_root: Path,
+    templates_root: Path,
     set_file: Path | None,
     source_dir: Path | None,
     ffmpeg_exe: str,
@@ -479,7 +593,7 @@ def run_flow(
     confirm_steps: bool,
     stop_after_render: bool,
 ) -> None:
-    paths = build_prep_paths(prep_root)
+    paths = build_prep_paths(prep_root, templates_root)
     ensure_dirs(paths)
 
     resolved_source_dir = source_dir or paths.source_files
@@ -517,6 +631,9 @@ def run_flow(
         print(json.dumps(source_tags, ensure_ascii=False, indent=2))
         maybe_confirm(confirm_steps, "After tag extraction")
 
+        cover_art_file = extract_cover_art(source_file, paths.coverart, dry_run=dry_run)
+        maybe_confirm(confirm_steps, "After cover art extraction")
+
         converted_aiff = convert_to_aiff(source_file, paths.converted_aiff, ffmpeg_exe=ffmpeg_exe, dry_run=dry_run)
         maybe_confirm(confirm_steps, "After conversion to AIFF")
 
@@ -526,14 +643,15 @@ def run_flow(
         run_reaper_render(
             reaper_exe=reaper_exe,
             reaper_project=resolved_reaper_project,
+            templates_dir=paths.templates,
             logs_dir=paths.logs,
             file_stem=source_file.stem,
             dry_run=dry_run,
         )
         maybe_confirm(confirm_steps, "After Reaper render")
 
-        rendered_aiff = rename_render_output(paths.processed_aiff, target_stem=source_file.stem, dry_run=dry_run)
-        maybe_confirm(confirm_steps, "After renaming rendered output")
+        rendered_aiff = move_render_output(paths.templates, paths.processed_aiff, target_stem=source_file.stem, dry_run=dry_run)
+        maybe_confirm(confirm_steps, "After moving rendered output")
 
         if stop_after_render:
             print("[INFO] Stop-after-render enabled. Skipping Essentia, tagging, and metadata output.")
@@ -571,6 +689,9 @@ def run_flow(
         )
         maybe_confirm(confirm_steps, "After writing tagged AIFF tags")
 
+        embed_cover_art(tagged_aiff, cover_art_file, dry_run=dry_run)
+        maybe_confirm(confirm_steps, "After embedding cover art")
+
         print(
             "[INFO] Audio processing summary: "
             f"converted='{converted_aiff.name}', rendered='{rendered_aiff.name}', tagged='{tagged_aiff.name}'"
@@ -588,6 +709,7 @@ def run_flow(
                 "template_input": str(paths.templates / "input.aif"),
                 "processed_aiff": str(rendered_aiff),
                 "tagged_aiff": str(tagged_aiff),
+                "cover_art_file": str(cover_art_file) if cover_art_file else None,
                 "essentia_json": str(essentia_json),
                 "metadata_match_source": metadata_match.source,
                 "metadata_entry": {
@@ -609,6 +731,7 @@ def run_flow(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run DJ set prep workflow on Sourcefiles.")
     parser.add_argument("--prep-root", type=Path, default=DEFAULT_PREP_ROOT, help="DJ-SET-PREP root directory.")
+    parser.add_argument("--templates-root", type=Path, default=DEFAULT_TEMPLATES_ROOT, help="Templates directory path.")
     parser.add_argument(
         "--set-file",
         type=Path,
@@ -627,7 +750,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--reaper-project",
         type=Path,
         default=None,
-        help="Optional Reaper project path. Default: Templates/DJ Set Prep.rpp under prep root.",
+        help="Optional Reaper project path. Default: Templates/DJ Set Prep.rpp under templates root.",
     )
     parser.add_argument("--essentia-exe", type=Path, default=DEFAULT_ESSENTIA_EXE)
     parser.add_argument("--default-genre", default="Electronic")
@@ -648,6 +771,7 @@ def main() -> None:
 
     run_flow(
         prep_root=args.prep_root,
+        templates_root=args.templates_root,
         set_file=args.set_file,
         source_dir=args.source_dir,
         ffmpeg_exe=args.ffmpeg_exe,
