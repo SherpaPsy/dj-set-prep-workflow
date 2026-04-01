@@ -4,10 +4,16 @@ import argparse
 import json
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    from essentia.standard import MusicExtractor
+except ImportError:
+    MusicExtractor = None
 
 from mutagen import File as MutagenFile
 from mutagen.aiff import AIFF
@@ -15,11 +21,17 @@ from mutagen.id3 import COMM, ID3, TALB, TCON, TIT2, TPE1, TPE2, TDRC
 
 from .tag_set_mp3s import TrackEntry, normalize, parse_set_file
 
-DEFAULT_PREP_ROOT = Path(r"C:\Users\sherp\OneDrive\Music\DJ-Set-Prep")
-DEFAULT_REAPER_EXE = Path(r"C:\Program Files\REAPER (x64)\reaper.exe")
-DEFAULT_ESSENTIA_EXE = Path(
-    r"D:\AudioTools\essentia-extractors-v2.1_beta2\streaming_extractor_music.exe"
-)
+# OS-specific paths
+if sys.platform == "win32":
+    DEFAULT_PREP_ROOT = Path(r"C:\Users\sherp\OneDrive\Music\DJ-Set-Prep")
+    DEFAULT_REAPER_EXE = Path(r"C:\Program Files\REAPER (x64)\reaper.exe")
+elif sys.platform == "darwin":
+    DEFAULT_PREP_ROOT = Path("/Users/ritb/OneDrive/Music/DJ-Set-Prep")
+    DEFAULT_REAPER_EXE = Path("/Applications/REAPER.app/Contents/MacOS/REAPER")
+else:
+    # Linux or other
+    DEFAULT_PREP_ROOT = Path.home() / "OneDrive" / "Music" / "DJ-Set-Prep"
+    DEFAULT_REAPER_EXE = Path("/usr/bin/reaper")
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".aif", ".aiff", ".flac", ".m4a"}
 
@@ -241,35 +253,44 @@ def rename_render_output(processed_dir: Path, target_stem: str, dry_run: bool) -
 def run_essentia_single(
     rendered_file: Path,
     logs_dir: Path,
-    essentia_exe: Path,
     dry_run: bool,
 ) -> Path:
     json_path = logs_dir / f"{rendered_file.stem}.essentia.json"
-    log_path = logs_dir / f"{rendered_file.stem}.essentia.log"
-    cmd = [str(essentia_exe), str(rendered_file), str(json_path)]
 
     print("[START] Essentia")
     print(f"[INFO] Essentia input: {rendered_file}")
     print(f"[INFO] Essentia output JSON: {json_path}")
+    
     if dry_run:
-        print(f"[DRY-RUN] Essentia: {' '.join(cmd)}")
+        print("[DRY-RUN] Would extract audio features using essentia MusicExtractor")
     else:
+        if MusicExtractor is None:
+            raise ImportError(
+                "Essentia Python library not found. Install with: poetry install"
+            )
+        
         print("[INFO] Essentia processing started (this step can be slow)...")
         started = time.monotonic()
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        while process.poll() is None:
-            elapsed = int(time.monotonic() - started)
-            print(f"[INFO] Essentia still running... {elapsed}s")
-            time.sleep(5)
-
-        stdout, stderr = process.communicate()
-        if process.returncode != 0:
-            raise subprocess.CalledProcessError(process.returncode, cmd, output=stdout, stderr=stderr)
-
-        elapsed = time.monotonic() - started
-        log_path.write_text((stdout or "") + "\n" + (stderr or ""), encoding="utf-8")
-        print(f"[INFO] Essentia log: {log_path}")
-        print(f"[INFO] Essentia duration: {elapsed:.1f}s")
+        
+        try:
+            extractor = MusicExtractor()
+            results = extractor(str(rendered_file))
+            
+            # Convert essentia results to JSON-serializable format
+            essence_dict = {}
+            for key, value in results.items():
+                if hasattr(value, 'tolist'):
+                    essence_dict[key] = value.tolist()
+                else:
+                    essence_dict[key] = float(value) if isinstance(value, (int, float)) else str(value)
+            
+            json_path.write_text(json.dumps(essence_dict, indent=2), encoding="utf-8")
+            
+            elapsed = time.monotonic() - started
+            print(f"[INFO] Essentia duration: {elapsed:.1f}s")
+        except Exception as e:
+            raise RuntimeError(f"Essentia extraction failed: {e}")
+    
     print(f"[INFO] Essentia JSON: {json_path}")
     print("[DONE] Essentia")
     return json_path
@@ -279,9 +300,10 @@ def extract_essentia_summary(json_path: Path) -> str:
     if not json_path.exists():
         return "essentia:missing"
 
-    payload = json.loads(json_path.read_text(encoding="utf-8"))
-
-    def get_nested(data: dict[str, Any], *keys: str) -> Any:
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, ValueError):
+            return "essentia:parse-error"
         current: Any = data
         for key in keys:
             if not isinstance(current, dict):
@@ -456,7 +478,6 @@ def run_flow(
     ffmpeg_exe: str,
     reaper_exe: Path,
     reaper_project: Path | None,
-    essentia_exe: Path,
     default_genre: str,
     max_tracks: int | None,
     dry_run: bool,
@@ -521,7 +542,6 @@ def run_flow(
         essentia_json = run_essentia_single(
             rendered_file=rendered_aiff,
             logs_dir=paths.logs,
-            essentia_exe=essentia_exe,
             dry_run=dry_run,
         )
         essentia_comment = extract_essentia_summary(essentia_json)
@@ -603,7 +623,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional Reaper project path. Default: Templates/DJ Set Prep.rpp under prep root.",
     )
-    parser.add_argument("--essentia-exe", type=Path, default=DEFAULT_ESSENTIA_EXE)
+
     parser.add_argument("--default-genre", default="Electronic")
     parser.add_argument("--max-tracks", type=int, default=None)
     parser.add_argument("--confirm-steps", action="store_true", help="Pause for confirmation after each stage.")
@@ -622,7 +642,7 @@ def main() -> None:
         ffmpeg_exe=args.ffmpeg_exe,
         reaper_exe=args.reaper_exe,
         reaper_project=args.reaper_project,
-        essentia_exe=args.essentia_exe,
+
         default_genre=args.default_genre,
         max_tracks=args.max_tracks,
         dry_run=args.dry_run,

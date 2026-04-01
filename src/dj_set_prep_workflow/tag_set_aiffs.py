@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,7 +14,16 @@ SEPARATOR = "===================="
 
 # Global configuration
 YEAR = 2026
-DJ_SET_PREP_ROOT = Path(r"C:\Users\sherp\OneDrive\Music\DJ-Set-Prep")
+
+# OS-specific paths
+if sys.platform == "win32":
+    DJ_SET_PREP_ROOT = Path(r"C:\Users\sherp\OneDrive\Music\DJ-Set-Prep")
+elif sys.platform == "darwin":
+    DJ_SET_PREP_ROOT = Path("/Users/ritb/OneDrive/Music/DJ-Set-Prep")
+else:
+    # Linux or other
+    DJ_SET_PREP_ROOT = Path.home() / "OneDrive" / "Music" / "DJ-Set-Prep"
+
 AIFF_SOURCE = DJ_SET_PREP_ROOT / "Sourcefiles"
 INIT_TARGET_PATH = DJ_SET_PREP_ROOT / "Metadata"
 
@@ -320,7 +330,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=AIFF_SOURCE,
         help=(
             "Root folder containing source AIFF files (searched recursively). "
-            "Default: C:\\Users\\sherp\\OneDrive\\Music\\DJ-Set-Prep\\Sourcefiles"
+            f"Default: {AIFF_SOURCE}"
         ),
     )
     parser.add_argument(
