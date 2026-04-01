@@ -1,0 +1,29 @@
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Azee_Project-Raise-Main_Mix-78594226.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Bashar-Sensation-Original_Mix-78458955.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Deep_Funk_Project-Going_Deeper-Hobin_Rude_Remix-78594051.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Gav_Easby__Hobin_Rude-The_Promise-Luis_Damora_Remix-78594190.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Guy_Contact-Dance_In_The_Grey-Original_Mix-78495233.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Haskell-Magic_Pills-Extended_Mix-78528481.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Joel_Berry-Highly_Unusual_Research-Extended_Mix-78528427.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Massy_Kind-Close_Enough_To_Feel-Original_Mix-78527996.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Mikhail_Catan-Omen-Original_Mix-78527999.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\NEOREC395PR__Asida_Aya_-_Elevation__Extended_Mix.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Regard__Carston-Higher_Love-Original_Mix-78495362.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Riolie-Intersection___Sandragana-Original_Mix-78495066.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Riolie-Intersection___Sandragana-Original_Mix-78495067.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Space_Native-Say__What_You_Don_t_Say_-Original_Mix-78495004.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\St.Ego-Fever_Dream-Extended_Mix-78594308.wav
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Veive-Unbodied__EP_-Extended_Mix-78459694.wav
+<CONFIG
+  OUTPATH "C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ProcessedFiles"
+  OUTPATTERN "$item"
+  FORMAT 1
+  SRATE 44100
+  NCH 2
+  RSMODE 3
+  DITHER 0
+  USESRCMETADATA "0"
+  FXCHAIN "DJ-Pre-Master.RfxChain"
+  FX_NCH "2"
+  CPULIMIT "0"
+>

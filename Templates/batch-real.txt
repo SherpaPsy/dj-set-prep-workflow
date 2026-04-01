@@ -1,0 +1,9 @@
+C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ConvertedFiles\Azee_Project-Raise-Main_Mix-78594226.aif	C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ProcessedFiles\Azee_Project-Raise-Main_Mix-78594226.aif
+<CONFIG
+  SRATE 44100
+  NCH 2
+  RSMODE 3
+  DITHER 0
+  OUTPATH C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\Processed
+  OUTPATTERN output
+  

@@ -1,0 +1,13 @@
+<CONFIG
+  OUTPATH "C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\ProcessedFiles"
+  OUTPATTERN "$item"
+  FORMAT 1
+  SRATE 44100
+  NCH 2
+  RSMODE 3
+  DITHER 0
+  USESRCMETADATA "0"
+  FXCHAIN "DJ-Pre-Master.RfxChain"
+  FX_NCH "2"
+  CPULIMIT "0"
+>

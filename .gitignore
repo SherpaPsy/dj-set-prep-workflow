@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Audio/DAW
+*.reapeaks
+*.pdf
+*.log
