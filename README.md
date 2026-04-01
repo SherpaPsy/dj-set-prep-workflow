@@ -38,12 +38,12 @@ Optional separator line every few tracks:
 
 Default source MP3 folder:
 
-`C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\SourceMP3s`
+`C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\Sourcefiles`
 
 Global config variables in `src/dj_set_prep_workflow/tag_set_mp3s.py`:
 
 - `YEAR = 2026`
-- `MP3_SOURCE = C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\SourceMP3s`
+- `MP3_SOURCE = C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\Sourcefiles`
 - `INIT_TARGET_PATH = C:\Users\sherp\OneDrive\Music\DJ-Set-Prep\Metadata`
 
 ### Run
@@ -95,44 +95,40 @@ C:\Users\sherp\OneDrive\Music\DJ-Set-Prep
 │   ├── raw-track-metadata.txt
 │   └── processed-track-metadata.txt
 ├── ProcessedAIFF
-└── SourceMP3s
+├── Sourcefiles
+└── Templates
 ```
 
 What it does:
 
-1. Reads `Metadata/raw-track-metadata.txt` for title/artist/[label year] entries.
-2. Matches each entry to one MP3 in `SourceMP3s`.
-3. Processes tracks one-by-one:
-	- reads existing MP3 tags into memory,
+1. Lists source audio files from `Sourcefiles` (mp3/wav/aif/aiff/flac/m4a).
+2. Processes each source file one-by-one.
+3. For each file:
+	- extracts existing tags into a dictionary (including path/name/stem),
 	- converts to 24-bit AIFF in `ConvertedAIFF`,
-	- runs pre-master tool into `ProcessedAIFF` (or passthrough if skipped),
-	- runs Essentia and writes JSON logs to `Logs`,
-	- updates destination AIFF tags in `ProcessedAIFF`.
-4. Writes full per-track metadata output to `Metadata/processed-track-metadata.txt`.
-5. Stops before iTunes import/playlist steps.
+	- copies converted file to `Templates/input.aiff`,
+	- runs Reaper render project (`Templates/DJ Set Prep.rpp`),
+	- renames `ProcessedAIFF/output.aif` to `ProcessedAIFF/<filename>.aif`,
+	- runs Essentia and writes JSON/logs to `Logs`,
+	- updates destination tags on rendered AIFF (title append from metadata line 3, Essentia comment, album artist, year/genre).
+4. Writes full per-track output to `Metadata/processed-track-metadata.txt`.
 
-If pre-master executable is not available yet, you can temporarily skip that stage and still test the rest of the flow:
+You can enable optional interactive pauses after each stage in dry or non-dry mode:
 
 ```powershell
-poetry run dj-flow --skip-premaster --max-tracks 1 --no-interactive-unsure
+poetry run dj-flow --confirm-steps --dry-run
 ```
 
-Dry run:
+Run a one-track dry-run with explicit tools:
 
 ```powershell
-poetry run dj-flow --dry-run
+poetry run dj-flow --prep-root "C:\Users\sherp\OneDrive\Music\DJ-Set-Prep" --ffmpeg-exe "D:\AudioTools\ffmpeg\bin\ffmpeg.exe" --reaper-exe "C:\Program Files\REAPER (x64)\reaper.exe" --essentia-exe "D:\AudioTools\essentia-extractors-v2.1_beta2\streaming_extractor_music.exe" --max-tracks 1 --dry-run
 ```
 
-Use explicit root and tool paths:
+Run real processing:
 
 ```powershell
-poetry run dj-flow --prep-root "C:\Users\sherp\OneDrive\Music\DJ-Set-Prep" --ffmpeg-exe "D:\AudioTools\ffmpeg\bin\ffmpeg.exe" --essentia-exe "D:\AudioTools\essentia-extractors-v2.1_beta2\streaming_extractor_music.exe" --dry-run
-```
-
-Disable interactive unsure-match prompts:
-
-```powershell
-poetry run dj-flow --no-interactive-unsure
+poetry run dj-flow --prep-root "C:\Users\sherp\OneDrive\Music\DJ-Set-Prep" --ffmpeg-exe "D:\AudioTools\ffmpeg\bin\ffmpeg.exe" --reaper-exe "C:\Program Files\REAPER (x64)\reaper.exe" --essentia-exe "D:\AudioTools\essentia-extractors-v2.1_beta2\streaming_extractor_music.exe"
 ```
 
 Custom genre:
