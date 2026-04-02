@@ -33,7 +33,7 @@
   >
   <APPLYFX_CFG
   >
-  RENDER_FILE "C:\Code\Personal\dj-set-prep-workflow\Templates\output.aif"
+  RENDER_FILE "/Users/ritb/Library/CloudStorage/OneDrive-Personal/Music/DJ-Set-Prep/Templates/output.aiff"
   RENDER_FMT 0 2 44100
   RENDER_1X 0
   RENDER_RANGE 1 0 0 0 1000
@@ -232,7 +232,7 @@
       CHANMODE 0
       GUID {EEFC4BF5-C927-4F8F-8A75-F9D3F17D7A4F}
       <SOURCE WAVE
-        FILE "C:\Code\Personal\dj-set-prep-workflow\Templates\input.aif"
+        FILE "/Users/ritb/Library/CloudStorage/OneDrive-Personal/Music/DJ-Set-Prep/Templates/input.aiff"
       >
     >
   >

@@ -11,6 +11,7 @@ from mutagen.id3 import ID3, TALB, TCON, TIT2, TPE1, TPE2, TDRC
 
 
 SEPARATOR = "===================="
+NOISE_TOKENS = {"ep"}
 
 # Global configuration
 YEAR = 2026
@@ -19,12 +20,12 @@ YEAR = 2026
 if sys.platform == "win32":
     DJ_SET_PREP_ROOT = Path(r"C:\Users\sherp\OneDrive\Music\DJ-Set-Prep")
 elif sys.platform == "darwin":
-    DJ_SET_PREP_ROOT = Path("/Users/ritb/OneDrive/Music/DJ-Set-Prep")
+    DJ_SET_PREP_ROOT = Path.home() / "Library" / "CloudStorage" / "OneDrive-Personal" / "Music" / "DJ-Set-Prep"
 else:
     # Linux or other
     DJ_SET_PREP_ROOT = Path.home() / "OneDrive" / "Music" / "DJ-Set-Prep"
 
-AIFF_SOURCE = DJ_SET_PREP_ROOT / "Sourcefiles"
+AIFF_SOURCE = DJ_SET_PREP_ROOT / "SourceFiles"
 INIT_TARGET_PATH = DJ_SET_PREP_ROOT / "Metadata"
 
 
@@ -83,6 +84,50 @@ def normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
+def tokenize(text: str) -> list[str]:
+    return [token for token in re.findall(r"[a-z0-9]+", text.lower()) if token]
+
+
+def _significant_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in tokenize(text)
+        if token not in NOISE_TOKENS and not token.isdigit()
+    }
+
+
+def _coverage_score(expected: str, candidate: str) -> int:
+    expected_tokens = _significant_tokens(expected)
+    if not expected_tokens:
+        return 0
+
+    candidate_tokens = _significant_tokens(candidate)
+    overlap = len(expected_tokens & candidate_tokens)
+    coverage = overlap / len(expected_tokens)
+
+    if coverage >= 1.0:
+        return 8
+    if coverage >= 0.75:
+        return 6
+    if coverage >= 0.5:
+        return 4
+    if coverage > 0:
+        return 2
+    return 0
+
+
+def _text_match_score(expected: str, candidate: str, *, weight: int) -> int:
+    expected_key = normalize(expected)
+    candidate_key = normalize(candidate)
+    score = 0
+
+    if expected_key and expected_key in candidate_key:
+        score += weight
+
+    score += _coverage_score(expected, candidate)
+    return score
+
+
 def find_set_file(set_dir: Path, explicit_set_file: Path | None) -> Path:
     if explicit_set_file:
         return explicit_set_file
@@ -124,19 +169,12 @@ def score_candidate_aiffs(
     aiff_files: list[Path],
     used: set[Path],
 ) -> list[tuple[int, Path]]:
-    title_key = normalize(entry.title)
-    artist_key = normalize(entry.artist)
-
     scored: list[tuple[int, Path]] = []
     for path in aiff_files:
         if path in used:
             continue
-        stem = normalize(path.stem)
-        score = 0
-        if title_key and title_key in stem:
-            score += 2
-        if artist_key and artist_key in stem:
-            score += 1
+        score = _text_match_score(entry.title, path.stem, weight=12)
+        score += _text_match_score(entry.artist, path.stem, weight=8)
         if score > 0:
             scored.append((score, path))
 
@@ -152,7 +190,7 @@ def is_uncertain_match(scored: list[tuple[int, Path]]) -> bool:
     top_ties = [item for item in scored if item[0] == top_score]
     if len(top_ties) > 1:
         return True
-    if top_score < 3:
+    if top_score < 14:
         return True
     return False
 
@@ -221,8 +259,7 @@ def tag_aiff(
         tags = ID3()
         audio.tags = tags
 
-    existing_title = _first_text(tags, "TIT2")
-    base_title = existing_title or entry.title.strip() or aiff_path.stem
+    base_title = entry.title.strip() or _first_text(tags, "TIT2") or aiff_path.stem
 
     label_year_suffix = ""
     if entry.label and entry.year:
@@ -239,15 +276,8 @@ def tag_aiff(
 
     tags.setall("TIT2", [TIT2(encoding=3, text=[final_title])])
 
-    artist_frame = tags.get("TPE1")
-    if artist_frame and artist_frame.text:
-        album_artist_value = artist_frame.text[0]
-    else:
-        album_artist_value = entry.artist
-        if not artist_frame:
-            tags.setall("TPE1", [TPE1(encoding=3, text=[entry.artist])])
-
-    tags.setall("TPE2", [TPE2(encoding=3, text=[album_artist_value])])
+    tags.setall("TPE1", [TPE1(encoding=3, text=[entry.artist])])
+    tags.setall("TPE2", [TPE2(encoding=3, text=[entry.artist])])
 
     if entry.year and not tags.get("TDRC"):
         tags.setall("TDRC", [TDRC(encoding=3, text=[entry.year])])

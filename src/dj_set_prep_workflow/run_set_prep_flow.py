@@ -26,7 +26,7 @@ if sys.platform == "win32":
     DEFAULT_PREP_ROOT = Path(r"C:\Users\sherp\OneDrive\Music\DJ-Set-Prep")
     DEFAULT_REAPER_EXE = Path(r"C:\Program Files\REAPER (x64)\reaper.exe")
 elif sys.platform == "darwin":
-    DEFAULT_PREP_ROOT = Path("/Users/ritb/OneDrive/Music/DJ-Set-Prep")
+    DEFAULT_PREP_ROOT = Path.home() / "Library" / "CloudStorage" / "OneDrive-Personal" / "Music" / "DJ-Set-Prep"
     DEFAULT_REAPER_EXE = Path("/Applications/REAPER.app/Contents/MacOS/REAPER")
 else:
     # Linux or other
@@ -61,11 +61,11 @@ def build_prep_paths(prep_root: Path) -> PrepPaths:
     return PrepPaths(
         root=prep_root,
         artwork=prep_root / "Artwork",
-        converted_aiff=prep_root / "ConvertedAIFF",
+        converted_aiff=prep_root / "ConvertedFiles",
         logs=prep_root / "Logs",
         metadata=metadata_dir,
-        processed_aiff=prep_root / "ProcessedAIFF",
-        source_files=prep_root / "Sourcefiles",
+        processed_aiff=prep_root / "ProcessedFiles",
+        source_files=prep_root / "SourceFiles",
         templates=prep_root / "Templates",
         raw_metadata_file=metadata_dir / "raw-track-metadata.txt",
         processed_metadata_file=metadata_dir / "processed-track-metadata.txt",
@@ -198,11 +198,12 @@ def copy_to_template_input(converted_aiff: Path, templates_dir: Path, dry_run: b
 def run_reaper_render(
     reaper_exe: Path,
     reaper_project: Path,
+    templates_dir: Path,
     logs_dir: Path,
     file_stem: str,
     dry_run: bool,
 ) -> Path:
-    output_path = logs_dir.parent / "ProcessedAIFF" / "output.aif"
+    output_path = templates_dir / "output.aif"
     log_path = logs_dir / f"{file_stem}.reaper.log"
     cmd = [str(reaper_exe), "-renderproject", str(reaper_project)]
 
@@ -233,15 +234,17 @@ def run_reaper_render(
     return output_path
 
 
-def rename_render_output(processed_dir: Path, target_stem: str, dry_run: bool) -> Path:
-    src = processed_dir / "output.aif"
+def rename_render_output(templates_dir: Path, processed_dir: Path, target_stem: str, dry_run: bool) -> Path:
+    candidate_sources = [templates_dir / "output.aif", templates_dir / "output.aiff"]
     dst = processed_dir / f"{target_stem}.aif"
     print(f"[START] Rename render output -> {dst.name}")
     if dry_run:
-        print(f"[DRY-RUN] rename: {src} -> {dst}")
+        print(f"[DRY-RUN] rename: {candidate_sources[0]} -> {dst}")
     else:
-        if not src.exists():
-            raise FileNotFoundError(f"Expected Reaper output not found: {src}")
+        src = next((path for path in candidate_sources if path.exists()), None)
+        if src is None:
+            expected = ", ".join(str(path) for path in candidate_sources)
+            raise FileNotFoundError(f"Expected Reaper output not found. Checked: {expected}")
         if dst.exists():
             dst.unlink()
         src.rename(dst)
@@ -275,11 +278,27 @@ def run_essentia_single(
         try:
             extractor = MusicExtractor()
             results = extractor(str(rendered_file))
+
+            # Essentia can return a mapping or a tuple of Pool objects (features, frames).
+            if isinstance(results, tuple):
+                features = results[0] if results else None
+            else:
+                features = results
+
+            if features is None:
+                raise TypeError(f"Unsupported Essentia result type: {type(results)!r}")
             
             # Convert essentia results to JSON-serializable format
             essence_dict = {}
-            for key, value in results.items():
-                if hasattr(value, 'tolist'):
+            if hasattr(features, "items"):
+                iterator = features.items()
+            elif hasattr(features, "descriptorNames") and callable(features.descriptorNames):
+                iterator = ((name, features[name]) for name in features.descriptorNames())
+            else:
+                raise TypeError(f"Unsupported Essentia feature container: {type(features)!r}")
+
+            for key, value in iterator:
+                if hasattr(value, "tolist"):
                     essence_dict[key] = value.tolist()
                 else:
                     essence_dict[key] = float(value) if isinstance(value, (int, float)) else str(value)
@@ -300,23 +319,18 @@ def extract_essentia_summary(json_path: Path) -> str:
     if not json_path.exists():
         return "essentia:missing"
 
-        try:
-            payload = json.loads(json_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, ValueError):
-            return "essentia:parse-error"
-        current: Any = data
-        for key in keys:
-            if not isinstance(current, dict):
-                return None
-            current = current.get(key)
-        return current
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError):
+        return "essentia:parse-error"
 
-    bpm = get_nested(payload, "rhythm", "bpm")
-    danceability = get_nested(payload, "rhythm", "danceability")
-    key = get_nested(payload, "tonal", "key_key")
-    scale = get_nested(payload, "tonal", "key_scale")
-    chords_key = get_nested(payload, "tonal", "chords_key")
-    chords_scale = get_nested(payload, "tonal", "chords_scale")
+    # Essentia flattens all keys with dot notation, not nested dicts
+    bpm = payload.get("rhythm.bpm")
+    danceability = payload.get("rhythm.danceability")
+    key = payload.get("tonal.key_temperley.key")
+    scale = payload.get("tonal.key_temperley.scale")
+    chords_key = payload.get("tonal.chords_key")
+    chords_scale = payload.get("tonal.chords_scale")
 
     camelot_map = {
         "major": {
@@ -455,7 +469,7 @@ def write_tags_to_processed_aiff(
 
     tags.delall("COMM")
     tags.add(COMM(encoding=3, lang="eng", desc="essentia", text=[essentia_comment]))
-    tags.save(rendered_aiff)
+    audio.save()
 
     print("[DONE] Write tags to processed AIFF")
     return result_tags
@@ -530,13 +544,19 @@ def run_flow(
         run_reaper_render(
             reaper_exe=reaper_exe,
             reaper_project=resolved_reaper_project,
+            templates_dir=paths.templates,
             logs_dir=paths.logs,
             file_stem=source_file.stem,
             dry_run=dry_run,
         )
         maybe_confirm(confirm_steps, "After Reaper render")
 
-        rendered_aiff = rename_render_output(paths.processed_aiff, target_stem=source_file.stem, dry_run=dry_run)
+        rendered_aiff = rename_render_output(
+            templates_dir=paths.templates,
+            processed_dir=paths.processed_aiff,
+            target_stem=source_file.stem,
+            dry_run=dry_run,
+        )
         maybe_confirm(confirm_steps, "After renaming rendered output")
 
         essentia_json = run_essentia_single(

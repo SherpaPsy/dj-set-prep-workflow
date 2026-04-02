@@ -9,7 +9,7 @@ packages = [{ include = "dj_set_prep_workflow", from = "src" }]
 [tool.poetry.dependencies]
 python = ">=3.10,<4.0"
 mutagen = "^1.47.0"
-essentia = "^2.1"
+essentia = ">=2.1b5,<3.0"
 
 [tool.poetry.scripts]
 dj-tag = "dj_set_prep_workflow.tag_set_mp3s:main"
