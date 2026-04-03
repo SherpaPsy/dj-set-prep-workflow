@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -17,7 +19,7 @@ except ImportError:
 
 from mutagen import File as MutagenFile
 from mutagen.aiff import AIFF
-from mutagen.id3 import COMM, ID3, TALB, TCON, TIT2, TPE1, TPE2, TDRC
+from mutagen.id3 import APIC, COMM, TALB, TCON, TIT2, TPE1, TPE2, TDRC
 
 from .tag_set_mp3s import TrackEntry, normalize, parse_set_file
 
@@ -44,6 +46,7 @@ class PrepPaths:
     logs: Path
     metadata: Path
     processed_aiff: Path
+    tagged_aiff: Path
     source_files: Path
     templates: Path
     raw_metadata_file: Path
@@ -65,6 +68,7 @@ def build_prep_paths(prep_root: Path) -> PrepPaths:
         logs=prep_root / "Logs",
         metadata=metadata_dir,
         processed_aiff=prep_root / "ProcessedFiles",
+        tagged_aiff=prep_root / "TaggedFiles",
         source_files=prep_root / "SourceFiles",
         templates=prep_root / "Templates",
         raw_metadata_file=metadata_dir / "raw-track-metadata.txt",
@@ -80,10 +84,29 @@ def ensure_dirs(paths: PrepPaths) -> None:
         paths.logs,
         paths.metadata,
         paths.processed_aiff,
+        paths.tagged_aiff,
         paths.source_files,
         paths.templates,
     ]:
         directory.mkdir(parents=True, exist_ok=True)
+
+
+def clear_directory(path: Path, dry_run: bool) -> None:
+    print(f"[START] Clear directory -> {path}")
+    if dry_run:
+        print(f"[DRY-RUN] clear directory: {path}")
+    else:
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir(parents=True, exist_ok=True)
+    print("[DONE] Clear directory")
+
+
+def clean_working_directories(paths: PrepPaths, dry_run: bool) -> None:
+    # Keep Logs and Metadata intact; clear only per-run outputs.
+    clear_directory(paths.converted_aiff, dry_run=dry_run)
+    clear_directory(paths.processed_aiff, dry_run=dry_run)
+    clear_directory(paths.tagged_aiff, dry_run=dry_run)
 
 
 def maybe_confirm(confirm_steps: bool, message: str) -> None:
@@ -124,12 +147,39 @@ def append_suffix_to_title(title: str, suffix: str | None) -> str:
     if not suffix:
         return title
 
+    # If the title already has a trailing [label yyyy]-style suffix,
+    # keep it and do not append another metadata suffix.
+    if re.search(r"\[[^\]]*\b(?:19|20)\d{2}\b[^\]]*\]\s*$", title):
+        return title
+
     title_norm = normalize(title)
     suffix_norm = normalize(suffix)
     if suffix_norm and title_norm.endswith(suffix_norm):
         return title
 
+    # Avoid duplicate title suffixes when title already ends with a bracketed
+    # label/year variant that normalizes to the same text.
+    bracketed_tail = re.search(r"\[(?P<inner>[^\]]+)\]\s*$", title)
+    if bracketed_tail and normalize(bracketed_tail.group("inner")) == suffix_norm:
+        return title
+
     return f"{title} {suffix}".strip()
+
+
+def read_artwork_frames(source_file: Path, rendered_aiff: Path) -> list[APIC]:
+    frames: list[APIC] = []
+
+    source_audio = MutagenFile(str(source_file))
+    if source_audio is not None and getattr(source_audio, "tags", None) is not None:
+        source_tags = source_audio.tags
+        if hasattr(source_tags, "getall"):
+            frames.extend(source_tags.getall("APIC"))
+
+    rendered_audio = AIFF(rendered_aiff)
+    if rendered_audio.tags is not None:
+        frames.extend(rendered_audio.tags.getall("APIC"))
+
+    return frames
 
 
 def find_metadata_match(
@@ -253,6 +303,18 @@ def rename_render_output(templates_dir: Path, processed_dir: Path, target_stem: 
     return dst
 
 
+def copy_processed_to_tagged(processed_aiff: Path, tagged_dir: Path, dry_run: bool) -> Path:
+    tagged_aiff = tagged_dir / processed_aiff.name
+    print(f"[START] Copy tagged AIFF -> {tagged_aiff.name}")
+    if dry_run:
+        print(f"[DRY-RUN] copy: {processed_aiff} -> {tagged_aiff}")
+    else:
+        shutil.copy2(processed_aiff, tagged_aiff)
+    print(f"[INFO] Tagged AIFF: {tagged_aiff}")
+    print("[DONE] Copy tagged AIFF")
+    return tagged_aiff
+
+
 def run_essentia_single(
     rendered_file: Path,
     logs_dir: Path,
@@ -317,12 +379,12 @@ def run_essentia_single(
 
 def extract_essentia_summary(json_path: Path) -> str:
     if not json_path.exists():
-        return "essentia:missing"
+        return "no-summary"
 
     try:
         payload = json.loads(json_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, ValueError):
-        return "essentia:parse-error"
+        return "no-summary"
 
     # Essentia flattens all keys with dot notation, not nested dicts
     bpm = payload.get("rhythm.bpm")
@@ -400,17 +462,17 @@ def extract_essentia_summary(json_path: Path) -> str:
         chords_text = "unknown"
 
     parts = [
-        f"bpm={bpm_text}" if bpm_text else None,
         f"key={key_text}" if key_text else None,
         f"chords={chords_text}" if chords_text else None,
         f"energy={energy_text}" if energy_text else None,
     ]
     filtered = [part for part in parts if part]
-    return "essentia:" + (";".join(filtered) if filtered else "no-summary")
+    return ";".join(filtered) if filtered else "no-summary"
 
 
 def write_tags_to_processed_aiff(
     rendered_aiff: Path,
+    source_file: Path,
     source_tags: dict[str, Any],
     metadata_entry: TrackEntry | None,
     essentia_comment: str,
@@ -448,27 +510,27 @@ def write_tags_to_processed_aiff(
         print("[DONE] Write tags to processed AIFF")
         return result_tags
 
+    artwork_frames = read_artwork_frames(source_file=source_file, rendered_aiff=rendered_aiff)
+
     audio = AIFF(rendered_aiff)
+    if audio.tags is None:
+        audio.add_tags()
     tags = audio.tags
     if tags is None:
-        tags = ID3()
-        audio.tags = tags
+        raise RuntimeError(f"Failed to initialize ID3 tags for {rendered_aiff}")
+    tags.clear()
 
     tags.setall("TIT2", [TIT2(encoding=3, text=[final_title])])
     tags.setall("TPE1", [TPE1(encoding=3, text=[artist_value])])
     tags.setall("TPE2", [TPE2(encoding=3, text=[album_artist_value])])
-
-    if year_value and not tags.get("TDRC"):
+    if year_value:
         tags.setall("TDRC", [TDRC(encoding=3, text=[year_value])])
-
-    if not tags.get("TCON"):
-        tags.setall("TCON", [TCON(encoding=3, text=[genre_value])])
-
-    if not tags.get("TALB"):
-        tags.setall("TALB", [TALB(encoding=3, text=[album_value])])
-
-    tags.delall("COMM")
+    tags.setall("TCON", [TCON(encoding=3, text=[genre_value])])
+    tags.setall("TALB", [TALB(encoding=3, text=[album_value])])
+    tags.add(COMM(encoding=3, lang="eng", desc="", text=[essentia_comment]))
     tags.add(COMM(encoding=3, lang="eng", desc="essentia", text=[essentia_comment]))
+    for frame in artwork_frames:
+        tags.add(copy.deepcopy(frame))
     audio.save()
 
     print("[DONE] Write tags to processed AIFF")
@@ -494,11 +556,14 @@ def run_flow(
     reaper_project: Path | None,
     default_genre: str,
     max_tracks: int | None,
+    clean_start: bool,
     dry_run: bool,
     confirm_steps: bool,
 ) -> None:
     paths = build_prep_paths(prep_root)
     ensure_dirs(paths)
+    if clean_start:
+        clean_working_directories(paths, dry_run=dry_run)
 
     resolved_source_dir = source_dir or paths.source_files
     resolved_set_file = set_file or paths.raw_metadata_file
@@ -578,6 +643,7 @@ def run_flow(
 
         processed_tags = write_tags_to_processed_aiff(
             rendered_aiff,
+            source_file=source_file,
             source_tags=source_tags,
             metadata_entry=metadata_match.entry,
             essentia_comment=essentia_comment,
@@ -586,9 +652,16 @@ def run_flow(
         )
         maybe_confirm(confirm_steps, "After writing processed AIFF tags")
 
+        tagged_aiff = copy_processed_to_tagged(
+            rendered_aiff,
+            tagged_dir=paths.tagged_aiff,
+            dry_run=dry_run,
+        )
+        maybe_confirm(confirm_steps, "After copying tagged AIFF")
+
         print(
             "[INFO] Audio processing summary: "
-            f"converted='{converted_aiff.name}', rendered='{rendered_aiff.name}'"
+            f"converted='{converted_aiff.name}', rendered='{rendered_aiff.name}', tagged='{tagged_aiff.name}'"
         )
         print(f"[INFO] essentia='{essentia_json.name}'")
 
@@ -602,6 +675,7 @@ def run_flow(
                 "converted_aiff": str(converted_aiff),
                 "template_input": str(paths.templates / "input.aiff"),
                 "processed_aiff": str(rendered_aiff),
+                "tagged_aiff": str(tagged_aiff),
                 "essentia_json": str(essentia_json),
                 "metadata_match_source": metadata_match.source,
                 "metadata_entry": {
@@ -646,6 +720,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--default-genre", default="Electronic")
     parser.add_argument("--max-tracks", type=int, default=None)
+    parser.add_argument(
+        "--clean-start",
+        action="store_true",
+        help="Clear ConvertedFiles, ProcessedFiles, and TaggedFiles before processing.",
+    )
     parser.add_argument("--confirm-steps", action="store_true", help="Pause for confirmation after each stage.")
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -665,6 +744,7 @@ def main() -> None:
 
         default_genre=args.default_genre,
         max_tracks=args.max_tracks,
+        clean_start=args.clean_start,
         dry_run=args.dry_run,
         confirm_steps=args.confirm_steps,
     )

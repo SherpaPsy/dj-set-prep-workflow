@@ -155,8 +155,20 @@ What it does:
 	- runs Reaper render project (`Templates/DJ Set Prep.rpp`),
 	- renames `ProcessedAIFF/output.aif` to `ProcessedAIFF/<filename>.aif`,
 	- runs Essentia and writes JSON/logs to `Logs`,
-	- updates destination tags on rendered AIFF (title append from metadata line 3, Essentia comment, album artist, year/genre).
+  - rewrites destination tags on the rendered AIFF (title append from metadata line 3, Essentia comment, album artist, year/genre),
+  - copies the final tagged AIFF to `TaggedFiles/<filename>.aif`.
 4. Writes full per-track output to `Metadata/processed-track-metadata.txt`.
+
+Optional cleanup:
+
+- Use `--clean-start` to clear `ConvertedFiles`, `ProcessedFiles`, and `TaggedFiles` before processing.
+- `Logs` and `Metadata` are not deleted by `--clean-start`.
+
+Overwrite behavior:
+
+- `Metadata/processed-track-metadata.txt` is overwritten each run.
+- Per-track logs and Essentia JSON files in `Logs` are overwritten when the same track stem is processed again.
+- Older unrelated files in `Logs` remain unless you delete them manually.
 
 You can enable optional interactive pauses after each stage in dry or non-dry mode:
 
@@ -179,7 +191,7 @@ poetry run dj-flow \
   --ffmpeg-exe "/opt/homebrew/bin/ffmpeg" \
   --reaper-exe "/Applications/REAPER.app/Contents/MacOS/reaper" \
   --essentia-exe "/path/to/essentia/streaming_extractor_music" \
-  --max-tracks 1 --dry-run
+  --max-tracks 1 --clean-start --dry-run
 ```
 
 **Windows (PowerShell):**
