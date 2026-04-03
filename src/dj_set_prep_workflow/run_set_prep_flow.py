@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 try:
     from essentia.standard import MusicExtractor
 except ImportError:
@@ -21,21 +23,90 @@ from mutagen import File as MutagenFile
 from mutagen.aiff import AIFF
 from mutagen.id3 import APIC, COMM, TALB, TCON, TIT2, TPE1, TPE2, TDRC
 
+from .paths import resolve_default_prep_root
 from .tag_set_mp3s import TrackEntry, normalize, parse_set_file
 
 # OS-specific paths
 if sys.platform == "win32":
-    DEFAULT_PREP_ROOT = Path(r"C:\Users\sherp\OneDrive\Music\DJ-Set-Prep")
+    DEFAULT_PREP_ROOT = resolve_default_prep_root()
     DEFAULT_REAPER_EXE = Path(r"C:\Program Files\REAPER (x64)\reaper.exe")
 elif sys.platform == "darwin":
-    DEFAULT_PREP_ROOT = Path.home() / "Library" / "CloudStorage" / "OneDrive-Personal" / "Music" / "DJ-Set-Prep"
+    DEFAULT_PREP_ROOT = resolve_default_prep_root()
     DEFAULT_REAPER_EXE = Path("/Applications/REAPER.app/Contents/MacOS/REAPER")
 else:
     # Linux or other
-    DEFAULT_PREP_ROOT = Path.home() / "OneDrive" / "Music" / "DJ-Set-Prep"
+    DEFAULT_PREP_ROOT = resolve_default_prep_root()
     DEFAULT_REAPER_EXE = Path("/usr/bin/reaper")
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".aif", ".aiff", ".flac", ".m4a"}
+
+ENERGY_COMPONENT_KEYS = {
+    "beat_mean": "rhythm.beats_loudness.mean",
+    "beat_stdev": "rhythm.beats_loudness.stdev",
+    "punch": "rhythm.beats_loudness.dmean2",
+    "spectral_mean": "lowlevel.spectral_energy.mean",
+    "spectral_max": "lowlevel.spectral_energy.max",
+    "dance": "rhythm.danceability",
+    "chords_strength": "tonal.chords_strength.mean",
+    "chords_change_rate": "tonal.chords_changes_rate",
+}
+
+FALLBACK_SCALER = {
+    "beat": {"low": 0.0, "high": 0.18},
+    "punch": {"low": 0.0, "high": 0.08},
+    "spectral": {"low": 0.0, "high": 0.25},
+    "dance": {"low": 0.0, "high": 3.0},
+    "harmonic": {"low": 0.0, "high": 0.5},
+}
+
+ENERGY_WEIGHTS = {
+    "beat": 0.40,
+    "punch": 0.10,
+    "spectral": 0.20,
+    "dance": 0.15,
+    "harmonic": 0.15,
+}
+
+CAMERLOT_MAP = {
+    "major": {
+        "B": "1B",
+        "F#": "2B",
+        "Gb": "2B",
+        "Db": "3B",
+        "C#": "3B",
+        "Ab": "4B",
+        "G#": "4B",
+        "Eb": "5B",
+        "D#": "5B",
+        "Bb": "6B",
+        "A#": "6B",
+        "F": "7B",
+        "C": "8B",
+        "G": "9B",
+        "D": "10B",
+        "A": "11B",
+        "E": "12B",
+    },
+    "minor": {
+        "Ab": "1A",
+        "G#": "1A",
+        "Eb": "2A",
+        "D#": "2A",
+        "Bb": "3A",
+        "A#": "3A",
+        "F": "4A",
+        "C": "5A",
+        "G": "6A",
+        "D": "7A",
+        "A": "8A",
+        "E": "9A",
+        "B": "10A",
+        "F#": "11A",
+        "Gb": "11A",
+        "C#": "12A",
+        "Db": "12A",
+    },
+}
 
 
 @dataclass(slots=True)
@@ -377,6 +448,209 @@ def run_essentia_single(
     return json_path
 
 
+def _numeric_value(payload: dict[str, Any], key: str) -> float | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    if isinstance(value, (list, tuple)):
+        numeric_values: list[float] = []
+        for item in value:
+            try:
+                numeric_values.append(float(item))
+            except (TypeError, ValueError):
+                continue
+        if not numeric_values:
+            return None
+        if key.endswith("max"):
+            return float(np.max(numeric_values))
+        if key.endswith("stdev"):
+            return float(np.std(numeric_values))
+        return float(np.mean(numeric_values))
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _camelot_key(key: Any, scale: Any) -> str | None:
+    if not key and not scale:
+        return None
+
+    scale_key = str(scale).lower() if scale else None
+    if key and scale_key in CAMERLOT_MAP:
+        mapped = CAMERLOT_MAP[scale_key].get(str(key))
+        if mapped:
+            return mapped
+    return "unknown"
+
+
+def _build_energy_components(payload: dict[str, Any]) -> dict[str, float] | None:
+    beat_mean = _numeric_value(payload, ENERGY_COMPONENT_KEYS["beat_mean"])
+    beat_stdev = _numeric_value(payload, ENERGY_COMPONENT_KEYS["beat_stdev"])
+    punch = _numeric_value(payload, ENERGY_COMPONENT_KEYS["punch"])
+    spectral_mean = _numeric_value(payload, ENERGY_COMPONENT_KEYS["spectral_mean"])
+    spectral_max = _numeric_value(payload, ENERGY_COMPONENT_KEYS["spectral_max"])
+    dance = _numeric_value(payload, ENERGY_COMPONENT_KEYS["dance"])
+    chords_strength = _numeric_value(payload, ENERGY_COMPONENT_KEYS["chords_strength"])
+    chords_change_rate = _numeric_value(payload, ENERGY_COMPONENT_KEYS["chords_change_rate"])
+
+    values = [
+        beat_mean,
+        beat_stdev,
+        punch,
+        spectral_mean,
+        spectral_max,
+        dance,
+        chords_strength,
+        chords_change_rate,
+    ]
+    if any(value is None for value in values):
+        return None
+
+    assert beat_mean is not None
+    assert beat_stdev is not None
+    assert punch is not None
+    assert spectral_mean is not None
+    assert spectral_max is not None
+    assert dance is not None
+    assert chords_strength is not None
+    assert chords_change_rate is not None
+
+    cv = beat_stdev / (beat_mean + 1e-9)
+    consistency = 1.0 / (1.0 + cv)
+    beat = (beat_mean * 0.6) + (consistency * 0.4)
+    spectral = (spectral_mean * 0.7) + (spectral_max * 0.3)
+    harmonic = (chords_strength * 0.5) + (chords_change_rate * 0.5)
+
+    return {
+        "beat": beat,
+        "punch": punch,
+        "spectral": spectral,
+        "dance": dance,
+        "harmonic": harmonic,
+    }
+
+
+def _fit_scaler(components: list[dict[str, float]]) -> dict[str, dict[str, float]]:
+    if len(components) < 2:
+        return FALLBACK_SCALER
+
+    scaler: dict[str, dict[str, float]] = {}
+    for key, bounds in FALLBACK_SCALER.items():
+        values = [item[key] for item in components]
+        low = float(np.percentile(values, 5))
+        high = float(np.percentile(values, 95))
+        if high <= low:
+            scaler[key] = bounds
+        else:
+            scaler[key] = {"low": low, "high": high}
+    return scaler
+
+
+def _score_energy(components: dict[str, float], scaler: dict[str, dict[str, float]]) -> int:
+    total = 0.0
+    for key, weight in ENERGY_WEIGHTS.items():
+        low = scaler[key]["low"]
+        high = scaler[key]["high"]
+        normalized = np.clip((components[key] - low) / (high - low + 1e-9), 0.0, 1.0)
+        total += weight * float(normalized)
+    return int(round(total * 100.0))
+
+
+def summarize_essentia_payload(payload: dict[str, Any], energy_value: int | None = None) -> dict[str, Any]:
+    key_text = _camelot_key(payload.get("tonal.key_temperley.key"), payload.get("tonal.key_temperley.scale"))
+    chords_text = _camelot_key(payload.get("tonal.chords_key"), payload.get("tonal.chords_scale"))
+
+    bpm_text = None
+    bpm_value = _numeric_value(payload, "rhythm.bpm")
+    if bpm_value is not None:
+        bpm_text = str(int(round(float(bpm_value))))
+
+    energy_text = None
+    if energy_value is not None:
+        energy_text = str(int(energy_value))
+    else:
+        danceability = _numeric_value(payload, "rhythm.danceability")
+        if danceability is not None:
+            energy_text = str(int(round(min(float(danceability), 10))))
+
+    parts = [
+        f"key={key_text}" if key_text else None,
+        f"chords={chords_text}" if chords_text else None,
+        f"energy={energy_text}" if energy_text else None,
+    ]
+    filtered = [part for part in parts if part]
+    comment = ";".join(filtered) if filtered else "no-summary"
+
+    return {
+        "comment": comment,
+        "key": key_text,
+        "chords": chords_text,
+        "bpm": bpm_text,
+        "energy": energy_text,
+    }
+
+
+def build_essentia_enrichment(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    per_track_payload: dict[str, dict[str, Any]] = {}
+    components_by_track: dict[str, dict[str, float]] = {}
+
+    for record in records:
+        json_path = Path(str(record.get("essentia_json", "")))
+        if not json_path.exists():
+            continue
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+        track_key = str(record.get("processed_aiff", json_path.stem))
+        per_track_payload[track_key] = payload
+        components = _build_energy_components(payload)
+        if components is not None:
+            components_by_track[track_key] = components
+
+    scaler = _fit_scaler(list(components_by_track.values()))
+
+    enrichment: dict[str, dict[str, Any]] = {}
+    for track_key, payload in per_track_payload.items():
+        energy_value = None
+        components = components_by_track.get(track_key)
+        if components is not None:
+            energy_value = _score_energy(components, scaler)
+        enrichment[track_key] = summarize_essentia_payload(payload, energy_value=energy_value)
+
+    return enrichment
+
+
+def update_essentia_comment_frames(audio_path: Path, comment: str, dry_run: bool) -> None:
+    print(f"[START] Update Essentia comment frames -> {audio_path.name}")
+    if dry_run:
+        print(f"[DRY-RUN] update COMM frames for {audio_path}: {comment}")
+        print("[DONE] Update Essentia comment frames")
+        return
+
+    audio = AIFF(audio_path)
+    if audio.tags is None:
+        audio.add_tags()
+    tags = audio.tags
+    if tags is None:
+        raise RuntimeError(f"Failed to initialize ID3 tags for {audio_path}")
+
+    for frame in list(tags.getall("COMM")):
+        tags.delall(frame.HashKey)
+
+    tags.add(COMM(encoding=3, lang="eng", desc="", text=[comment]))
+    tags.add(COMM(encoding=3, lang="eng", desc="essentia", text=[comment]))
+    audio.save()
+    print("[DONE] Update Essentia comment frames")
+
+
 def extract_essentia_summary(json_path: Path) -> str:
     if not json_path.exists():
         return "no-summary"
@@ -386,88 +660,7 @@ def extract_essentia_summary(json_path: Path) -> str:
     except (json.JSONDecodeError, ValueError):
         return "no-summary"
 
-    # Essentia flattens all keys with dot notation, not nested dicts
-    bpm = payload.get("rhythm.bpm")
-    danceability = payload.get("rhythm.danceability")
-    key = payload.get("tonal.key_temperley.key")
-    scale = payload.get("tonal.key_temperley.scale")
-    chords_key = payload.get("tonal.chords_key")
-    chords_scale = payload.get("tonal.chords_scale")
-
-    camelot_map = {
-        "major": {
-            "B": "1B",
-            "F#": "2B",
-            "Gb": "2B",
-            "Db": "3B",
-            "C#": "3B",
-            "Ab": "4B",
-            "G#": "4B",
-            "Eb": "5B",
-            "D#": "5B",
-            "Bb": "6B",
-            "A#": "6B",
-            "F": "7B",
-            "C": "8B",
-            "G": "9B",
-            "D": "10B",
-            "A": "11B",
-            "E": "12B",
-        },
-        "minor": {
-            "Ab": "1A",
-            "G#": "1A",
-            "Eb": "2A",
-            "D#": "2A",
-            "Bb": "3A",
-            "A#": "3A",
-            "F": "4A",
-            "C": "5A",
-            "G": "6A",
-            "D": "7A",
-            "A": "8A",
-            "E": "9A",
-            "B": "10A",
-            "F#": "11A",
-            "Gb": "11A",
-            "C#": "12A",
-            "Db": "12A",
-        },
-    }
-
-    bpm_text = None
-    try:
-        bpm_text = str(int(round(float(bpm))))
-    except Exception:
-        bpm_text = None
-
-    energy_text = None
-    try:
-        energy_text = str(int(round(min(float(danceability), 10))))
-    except Exception:
-        energy_text = None
-
-    key_text = None
-    scale_key = str(scale).lower() if scale else None
-    if key and scale_key in camelot_map:
-        key_text = camelot_map[scale_key].get(str(key))
-    if not key_text and (key or scale):
-        key_text = "unknown"
-
-    chords_text = None
-    chords_scale_key = str(chords_scale).lower() if chords_scale else None
-    if chords_key and chords_scale_key in camelot_map:
-        chords_text = camelot_map[chords_scale_key].get(str(chords_key))
-    if not chords_text and (chords_key or chords_scale):
-        chords_text = "unknown"
-
-    parts = [
-        f"key={key_text}" if key_text else None,
-        f"chords={chords_text}" if chords_text else None,
-        f"energy={energy_text}" if energy_text else None,
-    ]
-    filtered = [part for part in parts if part]
-    return ";".join(filtered) if filtered else "no-summary"
+    return str(summarize_essentia_payload(payload)["comment"])
 
 
 def write_tags_to_processed_aiff(
@@ -689,6 +882,29 @@ def run_flow(
                 "essentia_comment": essentia_comment,
             }
         )
+
+    enrichment_by_track = build_essentia_enrichment(processed_records)
+    for record in processed_records:
+        track_key = str(record.get("processed_aiff", ""))
+        enrichment = enrichment_by_track.get(track_key)
+        if not enrichment:
+            continue
+
+        updated_comment = str(enrichment.get("comment", "no-summary"))
+        record["essentia_comment"] = updated_comment
+        record["essentia_analysis"] = enrichment
+
+        processed_tags = record.get("processed_tags")
+        if isinstance(processed_tags, dict):
+            processed_tags["COMM:essentia"] = [updated_comment]
+
+        processed_aiff_path = Path(str(record.get("processed_aiff", "")))
+        tagged_aiff_path = Path(str(record.get("tagged_aiff", "")))
+
+        if processed_aiff_path.exists() or dry_run:
+            update_essentia_comment_frames(processed_aiff_path, updated_comment, dry_run=dry_run)
+        if tagged_aiff_path.exists() or dry_run:
+            update_essentia_comment_frames(tagged_aiff_path, updated_comment, dry_run=dry_run)
 
     write_processed_metadata(processed_records, paths.processed_metadata_file, dry_run=dry_run)
     print("\nFlow complete.")

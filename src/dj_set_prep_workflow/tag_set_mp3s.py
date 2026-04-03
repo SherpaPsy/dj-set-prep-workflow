@@ -9,6 +9,8 @@ from pathlib import Path
 from mutagen.id3 import COMM, ID3, TALB, TCON, TIT2, TPE1, TPE2, TDRC
 from mutagen.mp3 import MP3
 
+from .paths import resolve_default_prep_root
+
 
 SEPARATOR = "===================="
 NOISE_TOKENS = {"ep"}
@@ -16,14 +18,7 @@ NOISE_TOKENS = {"ep"}
 # Global configuration
 YEAR = 2026
 
-# OS-specific paths
-if sys.platform == "win32":
-    DJ_SET_PREP_ROOT = Path(r"C:\Users\sherp\OneDrive\Music\DJ-Set-Prep")
-elif sys.platform == "darwin":
-    DJ_SET_PREP_ROOT = Path.home() / "Library" / "CloudStorage" / "OneDrive-Personal" / "Music" / "DJ-Set-Prep"
-else:
-    # Linux or other
-    DJ_SET_PREP_ROOT = Path.home() / "OneDrive" / "Music" / "DJ-Set-Prep"
+DJ_SET_PREP_ROOT = resolve_default_prep_root()
 
 MP3_SOURCE = DJ_SET_PREP_ROOT / "SourceFiles"
 INIT_TARGET_PATH = DJ_SET_PREP_ROOT / "Metadata"

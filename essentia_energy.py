@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Optional, cast
 
 import numpy as np
+import pandas as pd  # type: ignore[import-not-found]
 
 try:
     from essentia.standard import MusicExtractor  # type: ignore[attr-defined]
@@ -26,13 +27,15 @@ def flatten_essentia_features(essentia_output: dict) -> dict:
             full_key = f"{prefix}.{key}" if prefix else key
             if isinstance(value, dict):
                 recurse(value, full_key)
-            elif isinstance(value, (list, tuple)) and key.endswith(("mean", "stdev", "dmean2")):
+            elif isinstance(value, (list, tuple)) and key.endswith(("mean", "stdev", "dmean2", "max")):
                 # For statistical keys, compute the statistic from array
                 if isinstance(value, (list, tuple)):
                     if key.endswith("mean"):
                         flat[full_key] = float(np.mean(value)) if value else 0.0
                     elif key.endswith("stdev"):
                         flat[full_key] = float(np.std(value)) if value else 0.0
+                    elif key.endswith("max"):
+                        flat[full_key] = float(np.max(value)) if value else 0.0
                     elif key.endswith("dmean2"):
                         # 2nd derivative approximation
                         if len(value) > 2:
@@ -114,74 +117,88 @@ def find_source_audio_files(source_dir: Path) -> list[Path]:
     return sorted(set(files), key=lambda p: p.name.lower())
 
 
-def energy_score(f: dict) -> float:
-    """
-    Composite energy score from Essentia features.
-    Returns 0.00–100.00  (soft/ambient → hard/driving)
+# ── Component Extraction & Scaling ────────────────────────────────────────
 
-    Weight breakdown:
-      Rhythm   55%  — beat intensity, consistency, punch, BPM, danceability
-      Spectral 30%  — sonic density, mastering loudness
-      Tonal    15%  — harmonic presence, repetitive structure
-    """
+WEIGHTS = {
+    "beat":     0.40,
+    "punch":    0.10,
+    "spectral": 0.20,
+    "dance":    0.15,
+    "harmonic": 0.15,
+}
 
-    # ── RHYTHM ────────────────────────────────────────────────────────────
 
-    # Beat loudness: ~0.05 = soft, ~0.20 = hard floor-filler
+def raw_components(f: dict) -> dict:
+    """Extract unnormalized component scores (raw math, no clipping)."""
     beat_mean  = f["rhythm.beats_loudness.mean"]
     beat_stdev = f["rhythm.beats_loudness.stdev"]
-    loudness    = np.clip(beat_mean / 0.20, 0.0, 1.0)
-
-    # Consistency: low CV = relentlessly even beat power
-    cv          = beat_stdev / (beat_mean + 1e-9)
+    cv         = beat_stdev / (beat_mean + 1e-9)
+    intensity  = beat_mean
     consistency = 1.0 / (1.0 + cv)
-    beat_score  = (loudness + consistency) / 2.0          # (25%)
+    beat_raw   = (intensity * 0.6) + (consistency * 0.4)
 
-    # Punch/attack: 2nd derivative = sharpness of transient hits
-    punch       = np.clip(f["rhythm.beats_loudness.dmean2"] / 0.08, 0.0, 1.0)  # (5%)
-
-    # Tempo: 60 BPM = 0.0 → 180 BPM = 1.0
-    bpm_score   = np.clip((f["rhythm.bpm"] - 60.0) / 120.0, 0.0, 1.0)          # (15%)
-
-    # Danceability: Essentia range ~0–3
-    dance_score = np.clip(f["rhythm.danceability"] / 3.0, 0.0, 1.0)             # (10%)
-
-
-    # ── SPECTRAL ──────────────────────────────────────────────────────────
-
-    # Spectral energy mean: sonic density between beats too
-    # ~0.01 = thin/sparse, ~0.12+ = dense/saturated
-    spectral    = np.clip(f["lowlevel.spectral_energy.mean"] / 0.12, 0.0, 1.0)  # (20%)
-
-    # Average loudness: 0.7 = natural dynamics, ~1.0 = brick-wall limited
-    # Good proxy for "pushed" dance tracks; weighted below spectral
-    avg_loud    = np.clip(f["lowlevel.average_loudness"], 0.0, 1.0)              # (10%)
+    return {
+        "beat":     beat_raw,
+        "punch":    f["rhythm.beats_loudness.dmean2"],
+        "spectral": (f["lowlevel.spectral_energy.mean"] * 0.7 +
+                     f["lowlevel.spectral_energy.max"]  * 0.3),
+        "dance":    f["rhythm.danceability"],
+        "harmonic": (f["tonal.chords_strength.mean"]    * 0.5 +
+                     f["tonal.chords_changes_rate"]      * 0.5),
+    }
 
 
-    # ── TONAL ─────────────────────────────────────────────────────────────
+def fit_scaler(all_features: list[dict], percentile_low: int = 5, percentile_high: int = 95) -> dict:
+    """
+    Compute per-component (p5, p95) bounds from library.
+    Uses percentiles instead of min/max to be robust to outliers.
+    """
+    rows = [raw_components(f) for f in all_features]
+    df = pd.DataFrame(rows)
+    scaler = {}
+    for col in df.columns:
+        scaler[col] = {
+            "low":  float(np.percentile(df[col], percentile_low)),
+            "high": float(np.percentile(df[col], percentile_high)),
+        }
+    return scaler
 
-    # Chord strength: how clearly the audio matches harmonic templates (0–1)
-    chord_str   = np.clip(f["tonal.chords_strength.mean"], 0.0, 1.0)            # (8%)
 
-    # Chord stability: low change rate = hypnotic / repetitive (house, techno)
-    # changes_rate ~0.03 = barely changes, ~0.3 = changes every few bars
-    # Inverted: stable = higher score
-    chord_stab  = 1.0 - np.clip(f["tonal.chords_changes_rate"] / 0.30, 0.0, 1.0)  # (7%)
+def energy_score(f: dict, scaler: Optional[dict] = None) -> float:
+    """
+    Library-fitted energy score for house/techno subgenres.
+    Returns 0.00–100.00  (deep/atmospheric → hard/driving)
 
+    If scaler is provided, normalizes using library p5/p95 bounds.
+    If scaler is None, uses fixed fallback bounds (backward compatible).
 
-    # ── WEIGHTED SUM ──────────────────────────────────────────────────────
-    score = (
-        0.25 * beat_score   +   # loud + consistent beats
-        0.05 * punch        +   # percussive snap/attack
-        0.15 * bpm_score    +   # tempo
-        0.10 * dance_score  +   # rhythmic regularity
-        0.20 * spectral     +   # overall sonic density
-        0.10 * avg_loud     +   # mastering / compression level
-        0.08 * chord_str    +   # tonal presence
-        0.07 * chord_stab       # repetitive harmonic structure
-    )
+    Weights:
+      40%  Beat intensity & consistency  (core driving force)
+      10%  Percussive punch              (afro/tech snap vs. smooth deep)
+      20%  Spectral density              (thin/spacious vs. full/dense)
+      15%  Danceability                  (groove strength & regularity)
+      15%  Harmonic activity             (melodic complexity vs. minimal)
+    """
+    raw = raw_components(f)
+    normed = {}
 
-    return round(score * 100.0, 2)
+    if scaler is None:
+        # Fallback: use fixed normalization bounds
+        scaler = {
+            "beat":     {"low": 0.0,  "high": 0.18},
+            "punch":    {"low": 0.0,  "high": 0.08},
+            "spectral": {"low": 0.0,  "high": 0.25},
+            "dance":    {"low": 0.0,  "high": 3.0},
+            "harmonic": {"low": 0.0,  "high": 0.5},
+        }
+
+    for key, val in raw.items():
+        lo = scaler[key]["low"]
+        hi = scaler[key]["high"]
+        normed[key] = np.clip((val - lo) / (hi - lo + 1e-9), 0.0, 1.0)
+
+    score = sum(WEIGHTS[k] * normed[k] for k in WEIGHTS)
+    return int(round(score * 100.0))
 
 
 def find_essentia_jsons(logs_dir: Path) -> list[tuple[str, Path]]:
@@ -205,6 +222,7 @@ def find_essentia_jsons(logs_dir: Path) -> list[tuple[str, Path]]:
 def process_directory(logs_dir: Path, verbose: bool = False) -> list[dict]:
     """
     Process all Essentia JSON files in logs directory.
+    Fits scaler on all features, then scores all tracks.
     Returns list of dicts with track_id and energy_score.
     """
     essentia_files = find_essentia_jsons(logs_dir)
@@ -213,15 +231,31 @@ def process_directory(logs_dir: Path, verbose: bool = False) -> list[dict]:
         print(f"[WARN] No Essentia JSON files found in {logs_dir}")
         return []
     
-    results = []
+    # Step 1: Load all features
+    print(f"[INFO] Loading {len(essentia_files)} feature files...")
+    all_features = []
+    track_map = {}  # map track_id -> (json_path, features)
     
     for track_id, json_path in essentia_files:
         features = load_essentia_json(json_path)
         if features is None:
             continue
-        
+        all_features.append(features)
+        track_map[track_id] = (json_path, features)
+    
+    if not all_features:
+        print(f"[ERR] No valid feature files could be loaded")
+        return []
+    
+    # Step 2: Fit scaler on all features
+    print(f"[INFO] Fitting scaler on {len(all_features)} tracks...")
+    scaler = fit_scaler(all_features)
+    
+    # Step 3: Score all tracks using fitted scaler
+    results = []
+    for track_id, (json_path, features) in track_map.items():
         try:
-            score = energy_score(features)
+            score = energy_score(features, scaler)
             results.append({
                 "track_id": track_id,
                 "energy_score": score,
@@ -244,7 +278,8 @@ def process_source_files(
     save_json: bool = True,
 ) -> list[dict]:
     """
-    Analyze source audio files directly with Essentia and compute energy scores.
+    Analyze source audio files directly with Essentia.
+    Fits scaler on all features, then scores all tracks.
     Optionally writes per-track feature JSON files in logs_dir.
     """
     source_files = find_source_audio_files(source_dir)
@@ -255,18 +290,40 @@ def process_source_files(
     if save_json:
         logs_dir.mkdir(parents=True, exist_ok=True)
 
-    results = []
+    # Step 1: Extract all features from source files
+    print(f"[INFO] Extracting Essentia features from {len(source_files)} files...")
+    all_features = []
+    track_map = {}  # map track_id -> (audio_path, raw_features, flat_features, json_path)
+    
     for audio_path in source_files:
         track_id = audio_path.stem
         try:
             raw_features = extract_essentia_for_file(audio_path)
             flat_features = flatten_essentia_features(raw_features)
-            score = energy_score(flat_features)
-
             json_path = logs_dir / f"{track_id}.essentia.json"
+            
+            all_features.append(flat_features)
+            track_map[track_id] = (audio_path, raw_features, flat_features, json_path)
+        except Exception as e:
+            print(f"  [ERR] {track_id:50s} -> extraction failed: {e}")
+    
+    if not all_features:
+        print(f"[ERR] No features could be extracted")
+        return []
+    
+    # Step 2: Fit scaler on all features
+    print(f"[INFO] Fitting scaler on {len(all_features)} tracks...")
+    scaler = fit_scaler(all_features)
+    
+    # Step 3: Save JSON and score all tracks using fitted scaler
+    results = []
+    for track_id, (audio_path, raw_features, flat_features, json_path) in sorted(track_map.items()):
+        try:
+            score = energy_score(flat_features, scaler)
+            
             if save_json:
                 json_path.write_text(json.dumps(raw_features, indent=2), encoding="utf-8")
-
+            
             results.append(
                 {
                     "track_id": track_id,
@@ -277,10 +334,8 @@ def process_source_files(
             )
             if verbose:
                 print(f"  [OK] {track_id:50s} -> {score:6.2f}")
-        except KeyError as e:
-            print(f"  [ERR] {track_id:50s} -> missing feature: {e}")
         except Exception as e:
-            print(f"  [ERR] {track_id:50s} -> extraction failed: {e}")
+            print(f"  [ERR] {track_id:50s} -> scoring failed: {e}")
 
     return results
 
@@ -307,12 +362,12 @@ def print_results_table(results: list[dict]) -> None:
         else:
             band = "HARD"
 
-        print(f"{result['track_id']:<50} {band:>6} {score:>12.2f}")
+        print(f"{result['track_id']:<50} {band:>6} {score:>12d}")
     
     print("=" * 80)
     print(f"Processed: {len(results)} tracks")
     avg_score = np.mean([r["energy_score"] for r in results])
-    print(f"Average energy: {avg_score:.2f}")
+    print(f"Average energy: {int(round(avg_score))}")
     print()
 
 
