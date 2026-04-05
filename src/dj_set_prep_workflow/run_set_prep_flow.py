@@ -67,6 +67,13 @@ ENERGY_WEIGHTS = {
     "harmonic": 0.15,
 }
 
+REAPER_ITEM_LENGTH_RE = re.compile(r'(?m)^(\s+LENGTH)\s+[-+0-9.eE]+$')
+REAPER_RENDER_RANGE_RE = re.compile(r'(?m)^(\s+RENDER_RANGE)\s+\d+(.*)$')
+REAPER_SELECTION_RE = re.compile(r'(?m)^(\s+SELECTION)\s+[-+0-9.eE]+\s+[-+0-9.eE]+$')
+REAPER_SELECTION2_RE = re.compile(r'(?m)^(\s+SELECTION2)\s+[-+0-9.eE]+\s+[-+0-9.eE]+$')
+REAPER_RENDER_FILE_RE = re.compile(r'(?m)^(\s+RENDER_FILE)\s+".*"$')
+REAPER_SOURCE_FILE_RE = re.compile(r'(?ms)(<SOURCE WAVE\s*\n\s+FILE)\s+".*?"')
+
 CAMERLOT_MAP = {
     "major": {
         "B": "1B",
@@ -314,6 +321,63 @@ def copy_to_template_input(converted_aiff: Path, templates_dir: Path, dry_run: b
         shutil.copy2(converted_aiff, template_input)
     print("[DONE] Copy to template input")
     return template_input
+
+
+def _format_reaper_value(value: float) -> str:
+    formatted = f"{value:.15f}".rstrip("0").rstrip(".")
+    return formatted or "0"
+
+
+def get_audio_duration_seconds(audio_file: Path) -> float:
+    audio = MutagenFile(audio_file)
+    if audio is None or getattr(audio, "info", None) is None:
+        raise ValueError(f"Unable to read audio metadata for duration: {audio_file}")
+
+    duration = float(getattr(audio.info, "length", 0.0) or 0.0)
+    if duration <= 0:
+        raise ValueError(f"Audio duration must be positive for Reaper render: {audio_file}")
+    return duration
+
+
+def sync_reaper_project_to_input(
+    reaper_project: Path,
+    input_audio: Path,
+    output_audio: Path,
+    dry_run: bool,
+) -> float:
+    duration = get_audio_duration_seconds(input_audio)
+    formatted_duration = _format_reaper_value(duration)
+
+    print(f"[START] Sync Reaper project -> {reaper_project.name}")
+    print(f"[INFO] Reaper input source: {input_audio}")
+    print(f"[INFO] Reaper render target: {output_audio}")
+    print(f"[INFO] Reaper item duration: {formatted_duration}s")
+
+    if dry_run:
+        print("[DRY-RUN] would update Reaper project source path, item length, and time selection")
+        print("[DONE] Sync Reaper project")
+        return duration
+
+    project_text = reaper_project.read_text(encoding="utf-8")
+
+    replacements: list[tuple[re.Pattern[str], str]] = [
+        (REAPER_RENDER_FILE_RE, rf'\1 "{output_audio}"'),
+        (REAPER_RENDER_RANGE_RE, r'\1 4\2'),
+        (REAPER_SELECTION_RE, rf'\1 0 {formatted_duration}'),
+        (REAPER_SELECTION2_RE, rf'\1 0 {formatted_duration}'),
+        (REAPER_ITEM_LENGTH_RE, rf'\1 {formatted_duration}'),
+        (REAPER_SOURCE_FILE_RE, rf'\1 "{input_audio}"'),
+    ]
+
+    updated_text = project_text
+    for pattern, replacement in replacements:
+        updated_text, count = pattern.subn(replacement, updated_text, count=1)
+        if count != 1:
+            raise ValueError(f"Expected exactly one match for Reaper project update: {pattern.pattern}")
+
+    reaper_project.write_text(updated_text, encoding="utf-8")
+    print("[DONE] Sync Reaper project")
+    return duration
 
 
 def run_reaper_render(
@@ -798,6 +862,14 @@ def run_flow(
 
         copy_to_template_input(converted_aiff, paths.templates, dry_run=dry_run)
         maybe_confirm(confirm_steps, "After copying template input.aiff")
+
+        sync_reaper_project_to_input(
+            reaper_project=resolved_reaper_project,
+            input_audio=paths.templates / "input.aiff",
+            output_audio=paths.templates / "output.aif",
+            dry_run=dry_run,
+        )
+        maybe_confirm(confirm_steps, "After syncing Reaper project")
 
         run_reaper_render(
             reaper_exe=reaper_exe,

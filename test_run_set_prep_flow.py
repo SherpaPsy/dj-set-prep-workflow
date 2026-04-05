@@ -15,6 +15,7 @@ from dj_set_prep_workflow.run_set_prep_flow import (
     clean_working_directories,
     copy_processed_to_tagged,
     extract_essentia_summary,
+    sync_reaper_project_to_input,
     write_tags_to_processed_aiff,
 )
 from dj_set_prep_workflow.tag_set_mp3s import TrackEntry
@@ -209,6 +210,59 @@ class RunSetPrepFlowTests(unittest.TestCase):
             self.assertTrue((paths.converted_aiff / "a.txt").exists())
             self.assertTrue((paths.processed_aiff / "b.txt").exists())
             self.assertTrue((paths.tagged_aiff / "c.txt").exists())
+
+    def test_sync_reaper_project_updates_source_selection_and_length(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            input_aiff = root / "input.aiff"
+            output_aif = root / "output.aif"
+            reaper_project = root / "DJ Set Prep.rpp"
+
+            with aifc.open(str(input_aiff), "wb") as audio_file:
+                audio_file.setnchannels(2)
+                audio_file.setsampwidth(2)
+                audio_file.setframerate(44100)
+                audio_file.writeframes(b"\x00\x00\x00\x00" * 44100)
+
+            reaper_project.write_text(
+                "\n".join(
+                    [
+                        '<REAPER_PROJECT 0.1 "7.61/win64" 0 0',
+                        f'  RENDER_FILE "{root / "stale-output.aif"}"',
+                        '  RENDER_RANGE 1 0 0 0 1000',
+                        '  SELECTION 0 0',
+                        '  SELECTION2 0 0',
+                        '  <TRACK',
+                        '    <ITEM',
+                        '      LENGTH 468.29269841269843',
+                        '      <SOURCE WAVE',
+                        f'        FILE "{root / "stale-input.aiff"}"',
+                        '      >',
+                        '    >',
+                        '  >',
+                        '>',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            duration = sync_reaper_project_to_input(
+                reaper_project=reaper_project,
+                input_audio=input_aiff,
+                output_audio=output_aif,
+                dry_run=False,
+            )
+
+            self.assertAlmostEqual(duration, 1.0, places=3)
+
+            updated = reaper_project.read_text(encoding="utf-8")
+            self.assertIn(f'RENDER_FILE "{output_aif}"', updated)
+            self.assertIn('RENDER_RANGE 4 0 0 0 1000', updated)
+            self.assertIn('SELECTION 0 1', updated)
+            self.assertIn('SELECTION2 0 1', updated)
+            self.assertIn('LENGTH 1', updated)
+            self.assertIn(f'FILE "{input_aiff}"', updated)
 
 
 if __name__ == "__main__":
