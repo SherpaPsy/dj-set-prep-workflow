@@ -30,6 +30,7 @@ class TrackEntry:
     artist: str
     label: str | None
     year: str | None
+    filename: str | None = None
 
 
 def parse_set_file(set_file: Path) -> list[TrackEntry]:
@@ -43,19 +44,34 @@ def parse_set_file(set_file: Path) -> list[TrackEntry]:
         if line and line != SEPARATOR and not re.fullmatch(r"={8,}", line)
     ]
 
-    if len(lines) % 3 != 0:
-        raise ValueError(
-            f"Set file should have title/artist/[label year] triplets. Found {len(lines)} non-empty content lines."
-        )
-
     tracks: list[TrackEntry] = []
-    for idx in range(0, len(lines), 3):
-        title = lines[idx]
-        artist = lines[idx + 1]
-        label_line = lines[idx + 2]
+    for line_no, line in enumerate(lines, start=1):
+        parts = [part.strip() for part in line.split("|", maxsplit=2)]
+        if len(parts) != 3:
+            raise ValueError(
+                "Set file rows must be pipe-delimited as "
+                "artist|title [label year]|filename. "
+                f"Malformed row {line_no}: {line}"
+            )
 
-        label, year = parse_label_year(label_line)
-        tracks.append(TrackEntry(title=title, artist=artist, label=label, year=year))
+        artist, title_with_suffix, filename = parts
+        if not artist or not title_with_suffix or not filename:
+            raise ValueError(
+                "Set file rows must provide artist, title, and filename. "
+                f"Malformed row {line_no}: {line}"
+            )
+
+        title = title_with_suffix
+        label = None
+        year = None
+        bracketed_tail = re.search(r"\[(?P<inner>[^\]]+)\]\s*$", title_with_suffix)
+        if bracketed_tail:
+            title_prefix = title_with_suffix[: bracketed_tail.start()].strip()
+            if title_prefix:
+                title = title_prefix
+            label, year = parse_label_year(bracketed_tail.group("inner"))
+
+        tracks.append(TrackEntry(title=title, artist=artist, label=label, year=year, filename=filename))
 
     return tracks
 
@@ -126,20 +142,20 @@ def find_set_file(set_dir: Path, explicit_set_file: Path | None) -> Path:
     if explicit_set_file:
         return explicit_set_file
 
-    txt_files = sorted(set_dir.glob("*.txt"))
-    if not txt_files:
-        raise FileNotFoundError(f"No .txt file found in {set_dir}")
+    metadata_files = sorted([*set_dir.glob("*.txt"), *set_dir.glob("*.csv")])
+    if not metadata_files:
+        raise FileNotFoundError(f"No .txt or .csv metadata file found in {set_dir}")
 
-    raw_candidates = [path for path in txt_files if "raw" in path.stem.lower()]
+    raw_candidates = [path for path in metadata_files if "raw" in path.stem.lower()]
     non_empty_raw = [path for path in raw_candidates if path.stat().st_size > 0]
     if non_empty_raw:
         return non_empty_raw[0]
 
-    non_empty_txt = [path for path in txt_files if path.stat().st_size > 0]
-    if non_empty_txt:
-        return non_empty_txt[0]
+    non_empty_metadata = [path for path in metadata_files if path.stat().st_size > 0]
+    if non_empty_metadata:
+        return non_empty_metadata[0]
 
-    return raw_candidates[0] if raw_candidates else txt_files[0]
+    return raw_candidates[0] if raw_candidates else metadata_files[0]
 
 
 def find_mp3_files(source_dir: Path) -> list[Path]:
@@ -158,7 +174,18 @@ def score_candidate_mp3s(entry: TrackEntry, mp3_files: list[Path], used: set[Pat
     for path in mp3_files:
         if path in used:
             continue
-        score = _text_match_score(entry.title, path.stem, weight=12)
+
+        score = 0
+        if entry.filename:
+            expected_stem = Path(entry.filename).stem
+            expected_key = normalize(expected_stem)
+            candidate_key = normalize(path.stem)
+            if expected_key and expected_key == candidate_key:
+                score += 40
+            elif expected_key and (expected_key in candidate_key or candidate_key in expected_key):
+                score += 24
+
+        score += _text_match_score(entry.title, path.stem, weight=12)
         score += _text_match_score(entry.artist, path.stem, weight=8)
         if score > 0:
             scored.append((score, path))
@@ -330,13 +357,13 @@ def run(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Tag DJ set MP3 files using a set text file.")
-    parser.add_argument("set_dir", type=Path, help="Folder containing the set .txt file and MP3 files.")
+    parser = argparse.ArgumentParser(description="Tag DJ set MP3 files using a metadata file.")
+    parser.add_argument("set_dir", type=Path, help="Folder containing the set metadata file and MP3 files.")
     parser.add_argument(
         "--set-file",
         type=Path,
         default=None,
-        help="Optional explicit path to set text file. Defaults to *raw*.txt or first .txt in set_dir.",
+        help="Optional explicit metadata file path. Defaults to *raw*.txt/*raw*.csv or first .txt/.csv in set_dir.",
     )
     parser.add_argument(
         "--source-dir",

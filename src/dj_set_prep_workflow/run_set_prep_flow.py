@@ -149,7 +149,7 @@ def build_prep_paths(prep_root: Path) -> PrepPaths:
         tagged_aiff=prep_root / "TaggedFiles",
         source_files=prep_root / "SourceFiles",
         templates=prep_root / "Templates",
-        raw_metadata_file=metadata_dir / "raw-track-metadata.txt",
+        raw_metadata_file=metadata_dir / "raw-track-metadata.csv",
         processed_metadata_file=metadata_dir / "processed-track-metadata.txt",
     )
 
@@ -268,9 +268,19 @@ def find_metadata_match(
 ) -> MetadataMatch:
     title = str((source_tags.get("title") or [source_tags.get("file_stem", "")])[0]).strip()
     artist = str((source_tags.get("artist") or [""])[0]).strip()
+    source_stem = str(source_tags.get("file_stem", "")).strip()
 
     title_key = normalize(title)
     artist_key = normalize(artist)
+    source_stem_key = normalize(source_stem)
+
+    if source_stem_key:
+        for idx, entry in enumerate(metadata_entries):
+            if idx in used_entry_indices or not entry.filename:
+                continue
+            if normalize(Path(entry.filename).stem) == source_stem_key:
+                used_entry_indices.add(idx)
+                return MetadataMatch(entry=entry, source="filename")
 
     for idx, entry in enumerate(metadata_entries):
         if idx in used_entry_indices:
@@ -989,7 +999,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--set-file",
         type=Path,
         default=None,
-        help="Optional metadata file path. Default: Metadata/raw-track-metadata.txt under prep root.",
+        help="Optional metadata file path. Default: Metadata/raw-track-metadata.csv under prep root.",
     )
     parser.add_argument(
         "--source-dir",

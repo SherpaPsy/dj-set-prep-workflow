@@ -1,6 +1,6 @@
 This is a python based workflow to prepare tracks for DJ sets.
 
-## MP3 tagging from set text file
+## MP3 tagging from metadata file
 
 Script: `tag_set_mp3s.py`
 
@@ -12,27 +12,26 @@ poetry install
 
 ### Expected set file format
 
-Inside your set folder keep a text file with blocks of:
+Inside your set folder keep a metadata file with one row per track:
 
-1. `title (version)`
-2. `artist`
-3. `[label year]`
+1. `artist|title [label year]|filename`
 
 Example set folder path:
 - **Mac:** `~/Library/CloudStorage/OneDrive-Personal/Music/DJ-Set-Prep/Metadata`
 
-Optional separator line every few tracks:
+Example rows:
 
 ```text
-====================
+Sebastian Sellares|Sea Of Souls (Extended Mix) [Bedrock 2024]|Sebastian_Sellares-Sea_Of_Souls__EP_-Extended_Mix-79432091.mp3
+MissFly, Masaki Morii|Show Me (Main Mix) [2026]|Masaki_Morii__MissFly-Show_Me-Main_Mix-79783338.mp3
 ```
 
 ### What the script does
 
-- Uses set text file as source.
+- Uses metadata file as source.
 - Finds and tags MP3 files from source library folder (recursive).
 - Matches filenames using title and artist tokens, so common filename extras like `EP`, track IDs, or reordered artist names still resolve correctly.
-- Uses the set-file title as the output title and appends `[label year]` when not already present.
+- Uses the metadata title as the output title and appends `[label year]` when not already present.
 - Sets `Artist` and `Album Artist` from the set file.
 - Sets `Year` only when missing.
 - Clears all comments.
@@ -52,7 +51,7 @@ Global config variables in `src/dj_set_prep_workflow/tag_set_mp3s.py`:
 
 ### Run
 
-`set_dir` is required. It must be the folder that contains your set `.txt` file.
+`set_dir` is required. It must be the folder that contains your set metadata `.txt` or `.csv` file.
 
 If your set file is in:
 
@@ -87,14 +86,14 @@ Disable interactive unsure-match prompts:
 poetry run dj-tag ~/Library/CloudStorage/OneDrive-Personal/Music/DJ-Set-Prep/Metadata --no-interactive-unsure
 ```
 
-Specify set text file explicitly (if it can't be auto-detected in `set_dir`):
+Specify metadata file explicitly (if it can't be auto-detected in `set_dir`):
 
 **Mac:**
 ```bash
-poetry run dj-tag ~/Library/CloudStorage/OneDrive-Personal/Music/DJ-Set-Prep/Metadata --set-file ~/Library/CloudStorage/OneDrive-Personal/Music/DJ-Set-Prep/Metadata/raw-track-metadata.txt
+poetry run dj-tag ~/Library/CloudStorage/OneDrive-Personal/Music/DJ-Set-Prep/Metadata --set-file ~/Library/CloudStorage/OneDrive-Personal/Music/DJ-Set-Prep/Metadata/raw-track-metadata.csv
 ```
 
-If you see `Set file should have title/artist/[label year] triplets`, the selected text file is not in the expected 3-line repeating format. Point `--set-file` to the correct set list file.
+If you see `Set file rows must be pipe-delimited as artist|title [label year]|filename`, the selected file is not in the expected row format. Point `--set-file` to the correct metadata file.
 
 ### Backward compatible script call
 
@@ -122,7 +121,7 @@ Expected root directory structure:
 ├── Coverart
 ├── Logs
 ├── Metadata
-│   ├── raw-track-metadata.txt
+│   ├── raw-track-metadata.csv
 │   └── processed-track-metadata.txt
 ├── ProcessedFiles
 ├── SourceFiles
@@ -137,7 +136,7 @@ C:\Users\sherp\OneDrive\Music\DJ-Set-Prep
 ├── ConvertedAIFF
 ├── Logs
 ├── Metadata
-│   ├── raw-track-metadata.txt
+│   ├── raw-track-metadata.csv
 │   └── processed-track-metadata.txt
 ├── ProcessedAIFF
 ├── Sourcefiles

@@ -15,6 +15,7 @@ from dj_set_prep_workflow.run_set_prep_flow import (
     clean_working_directories,
     copy_processed_to_tagged,
     extract_essentia_summary,
+    find_metadata_match,
     sync_reaper_project_to_input,
     write_tags_to_processed_aiff,
 )
@@ -30,6 +31,39 @@ def _create_test_aiff(path: Path) -> None:
 
 
 class RunSetPrepFlowTests(unittest.TestCase):
+    def test_find_metadata_match_prefers_filename(self) -> None:
+        metadata_entries = [
+            TrackEntry(
+                title="Shared Title",
+                artist="Shared Artist",
+                label="Label A",
+                year="2026",
+                filename="exact-target-file.mp3",
+            ),
+            TrackEntry(
+                title="Source Title",
+                artist="Source Artist",
+                label="Label B",
+                year="2025",
+                filename="different-file.mp3",
+            ),
+        ]
+
+        match = find_metadata_match(
+            metadata_entries=metadata_entries,
+            source_tags={
+                "title": ["Source Title"],
+                "artist": ["Source Artist"],
+                "file_stem": "exact-target-file",
+            },
+            used_entry_indices=set(),
+            fallback_index=1,
+        )
+
+        self.assertIsNotNone(match.entry)
+        self.assertEqual(match.source, "filename")
+        self.assertEqual(match.entry, metadata_entries[0])
+
     def test_write_tags_replaces_existing_invalid_frames(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             rendered_aiff = Path(tmp_dir) / "rendered.aif"
