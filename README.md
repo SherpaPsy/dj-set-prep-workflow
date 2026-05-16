@@ -173,7 +173,7 @@ You can enable optional interactive pauses after each stage in dry or non-dry mo
 
 **Mac:**
 ```bash
-poetry run dj-flow --confirm-steps --dry-run
+poetry run dj-flow --clean-start
 ```
 
 **Windows (PowerShell):**
