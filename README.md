@@ -146,8 +146,9 @@ C:\Users\sherp\OneDrive\Music\DJ-Set-Prep
 What it does:
 
 1. Lists source audio files from `Sourcefiles` (mp3/wav/aif/aiff/flac/m4a).
-2. Processes each source file one-by-one.
-3. For each file:
+2. Runs an upfront transcode-detection scan across all discovered files (see below), prints a report to stdout, and pauses for you to review it before continuing.
+3. Processes each source file one-by-one.
+4. For each file:
 	- extracts existing tags into a dictionary (including path/name/stem),
 	- converts to 24-bit AIFF in `ConvertedAIFF`,
 	- copies converted file to `Templates/input.aiff`,
@@ -156,7 +157,21 @@ What it does:
 	- runs Essentia and writes JSON/logs to `Logs`,
   - rewrites destination tags on the rendered AIFF (title append from metadata line 3, Essentia comment, album artist, year/genre),
   - copies the final tagged AIFF to `TaggedFiles/<filename>.aif`.
-4. Writes full per-track output to `Metadata/processed-track-metadata.txt`.
+5. Writes full per-track output to `Metadata/processed-track-metadata.txt`.
+
+### Transcode detection scan
+
+Before any conversion or rendering happens, the flow runs every source file through [bitrater](https://github.com/yamsnjams/bitrater) — a pre-trained CNN+BiLSTM model that classifies the true encoding quality of an audio file from its spectral content (128/192/256/320 kbps CBR, V0/V2 VBR, or genuinely lossless) and flags a mismatch against what the file claims to be. This catches files that claim to be high bitrate (or are lossless WAV/AIFF/FLAC) but were actually upsampled/transcoded from a lower-bitrate lossy source.
+
+- Report columns: stated class (from file tags/container), detected class (from audio content), model confidence, and a verdict:
+  - `OK` — detected quality is consistent with the stated class.
+  - `LIKELY_TRANSCODED` — detected quality is meaningfully lower than the stated class (e.g. a "320kbps"/lossless file whose content matches a 128kbps source).
+  - `UNCERTAIN` — not flagged as a transcode, but the model's confidence was low; worth a manual listen.
+  - `ERROR` — the file couldn't be decoded/classified.
+- The bundled model claims ~98% accuracy per its own benchmarks, but this is still a classifier, not a certainty — treat flagged files as "worth a second listen," not confirmed fakes.
+- The bitrater model is loaded once per run (a one-time cost of several seconds), then reused for every file in the scan.
+- The flow pauses after printing the report so you can review it before processing continues. Press Enter to proceed.
+- Skip this step entirely with `--skip-transcode-check`.
 
 Optional cleanup:
 

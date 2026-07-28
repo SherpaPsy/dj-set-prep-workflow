@@ -23,6 +23,7 @@ from mutagen import File as MutagenFile
 from mutagen.aiff import AIFF
 from mutagen.id3 import APIC, COMM, TALB, TCON, TIT2, TPE1, TPE2, TDRC
 
+from .detect_transcodes import pause_for_transcode_review, run_transcode_scan
 from .paths import resolve_default_prep_root
 from .tag_set_mp3s import TrackEntry, normalize, parse_set_file
 
@@ -826,6 +827,7 @@ def run_flow(
     clean_start: bool,
     dry_run: bool,
     confirm_steps: bool,
+    skip_transcode_check: bool,
 ) -> None:
     paths = build_prep_paths(prep_root)
     ensure_dirs(paths)
@@ -855,6 +857,12 @@ def run_flow(
     print(f"Metadata file: {resolved_set_file}")
     print(f"Reaper project: {resolved_reaper_project}")
     print(f"Source files discovered: {len(source_files)}")
+
+    if skip_transcode_check:
+        print("[INFO] Transcode detection scan skipped (--skip-transcode-check)")
+    else:
+        run_transcode_scan(source_files)
+        pause_for_transcode_review()
 
     processed_records: list[dict[str, Any]] = []
     used_entry_indices: set[int] = set()
@@ -1024,6 +1032,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Clear ConvertedFiles, ProcessedFiles, and TaggedFiles before processing.",
     )
     parser.add_argument("--confirm-steps", action="store_true", help="Pause for confirmation after each stage.")
+    parser.add_argument(
+        "--skip-transcode-check",
+        action="store_true",
+        help="Skip the upfront transcode-detection scan and its pause.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -1045,6 +1058,7 @@ def main() -> None:
         clean_start=args.clean_start,
         dry_run=args.dry_run,
         confirm_steps=args.confirm_steps,
+        skip_transcode_check=args.skip_transcode_check,
     )
 
 
