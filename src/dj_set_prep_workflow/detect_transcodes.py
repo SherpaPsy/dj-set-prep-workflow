@@ -155,7 +155,12 @@ def run_transcode_scan(source_files: list[Path]) -> list[TranscodeFinding]:
     print("[START] Transcode detection scan")
     print("[INFO] Loading bitrater model (one-time cost per run)...")
     analyzer = AudioQualityAnalyzer()
-    findings = [analyze_file(analyzer, path) for path in source_files]
+    total = len(source_files)
+    print(f"[INFO] Model loaded. Analyzing {total} file(s)...")
+    findings = []
+    for i, path in enumerate(source_files, start=1):
+        print(f"[INFO] ({i}/{total}) Analyzing {path.name}...")
+        findings.append(analyze_file(analyzer, path))
     print(format_transcode_report(findings))
     print("[DONE] Transcode detection scan")
     return findings
