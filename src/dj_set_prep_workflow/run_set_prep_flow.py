@@ -120,7 +120,6 @@ CAMERLOT_MAP = {
 @dataclass(slots=True)
 class PrepPaths:
     root: Path
-    artwork: Path
     converted_aiff: Path
     logs: Path
     metadata: Path
@@ -142,7 +141,6 @@ def build_prep_paths(prep_root: Path) -> PrepPaths:
     metadata_dir = prep_root / "Metadata"
     return PrepPaths(
         root=prep_root,
-        artwork=prep_root / "Artwork",
         converted_aiff=prep_root / "ConvertedFiles",
         logs=prep_root / "Logs",
         metadata=metadata_dir,
@@ -158,7 +156,6 @@ def build_prep_paths(prep_root: Path) -> PrepPaths:
 def ensure_dirs(paths: PrepPaths) -> None:
     for directory in [
         paths.root,
-        paths.artwork,
         paths.converted_aiff,
         paths.logs,
         paths.metadata,

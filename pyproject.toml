@@ -16,6 +16,9 @@ bitrater = "^0.1.5"
 [tool.poetry.scripts]
 dj-tag = "dj_set_prep_workflow.tag_set_mp3s:main"
 dj-flow = "dj_set_prep_workflow.run_set_prep_flow:main"
+dj-menu = "dj_set_prep_workflow.menu:main"
+dj-prep-sources = "dj_set_prep_workflow.prepare_source_files:main"
+dj-import-music = "dj_set_prep_workflow.apple_music_import:main"
 
 [build-system]
 requires = ["poetry-core>=1.9.0"]

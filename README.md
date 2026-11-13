@@ -116,9 +116,7 @@ Expected root directory structure:
 **Mac** (`~/Library/CloudStorage/OneDrive-Personal/Music/DJ-Set-Prep`):
 ```text
 ~/Library/CloudStorage/OneDrive-Personal/Music/DJ-Set-Prep
-├── Artwork
 ├── ConvertedFiles
-├── Coverart
 ├── Logs
 ├── Metadata
 │   ├── raw-track-metadata.csv
@@ -132,7 +130,6 @@ Expected root directory structure:
 **Windows** (`C:\Users\sherp\OneDrive\Music\DJ-Set-Prep`):
 ```text
 C:\Users\sherp\OneDrive\Music\DJ-Set-Prep
-├── Artwork
 ├── ConvertedAIFF
 ├── Logs
 ├── Metadata
@@ -158,6 +155,56 @@ What it does:
   - rewrites destination tags on the rendered AIFF (title append from metadata line 3, Essentia comment, album artist, year/genre),
   - copies the final tagged AIFF to `TaggedFiles/<filename>.aif`.
 5. Writes full per-track output to `Metadata/processed-track-metadata.txt`.
+
+### Interactive menu
+
+Command: `dj-menu`
+
+```bash
+poetry run dj-menu
+```
+
+Prompts for one of:
+
+Items 1–3 are the weekly flow, in order:
+
+1. **Prepare source files** — see below (also available as `dj-prep-sources`).
+2. **Run clean** — same as `dj-flow --clean-start`.
+3. **Import to Apple Music** — see below (also available as `dj-import-music`).
+4. **Run** — process all source files, no cleanup first.
+5. **Run clean (dry-run)** — preview a clean run without touching any files.
+6. **Transcode check only** — runs just the transcode-detection scan below and prints its report; no conversion, rendering, or tagging.
+7. **Quit**
+
+All other options (source dir, metadata file, Reaper/ffmpeg paths, etc.) use `dj-flow`'s defaults. For anything beyond these, use `dj-flow` directly with flags.
+
+### Prepare source files
+
+Command: `dj-prep-sources` (or menu item 1)
+
+0. **Preflight:** matches the promo files' tags against `tracklist.csv` before touching anything. If fewer than half match, it prints a loud warning that the two look like different sets (stale promo folder or tracklist) and aborts unless you type `continue`. `-y` never overrides this.
+1. Shows what will happen and asks for confirmation (`-y` to skip), then **clears** `SourceFiles/`. Aborts without clearing if the promo folder has no audio.
+2. Copies every `.mp3` / `.aif(f)` / `.flac` / `.m4a` from `~/Library/CloudStorage/OneDrive-Personal/Music/ReleasePromo On OneDrive` into `SourceFiles/`. `.wav` files are converted to `.aiff` (same bit depth, tags and artwork carried over). Non-audio files (e.g. `.jpg`) are skipped.
+3. Matches each file to a row in `Metadata/tracklist.csv` (`Title,Artist` columns) and adds that row's `[Label Year]` to the file's title. The CSV comes from the pool web UI and is **release-level**: for EPs and remix packages its title is the release name (e.g. `Double Douze (EP)`), not the track's, and its artist list can include artists from other tracks on the release. So:
+   - **Title written** = the file's own title, tidied (extra spaces collapsed, any old bracketed suffix dropped) + the CSV's `[Label Year]`. E.g. `Lift Him Up (Original Mix) [Natura Viva 2026]`.
+   - **Artist written** = the file's own artist (the CSV artist is only used if the file has none).
+   - **Matching** is fuzzy on artist, and compares the CSV title with both the file's title and its **album** tag, so EP rows match their tracks. Each CSV row is used at most once. Matches scoring under 0.85 are flagged `<-- CHECK`, files whose track title differs from the CSV row show that row for reference, and unmatched files/rows are listed (unmatched files keep their tags).
+
+Flags: `--prep-root`, `--promo-dir`, `--tracklist`, `--ffmpeg-exe`, `-y/--yes`.
+
+### Import to Apple Music
+
+Command: `dj-import-music` (or menu item 3). macOS only; drives Music.app via AppleScript. The first run triggers a macOS prompt to let your terminal control Music; click **Allow** (System Settings → Privacy & Security → Automation).
+
+Imports everything in `TaggedFiles/` into a **new** playlist named for the upcoming Saturday as `YYYY.MM.DD` (today, if today is Saturday). One batch is one playlist, so it checks before changing anything:
+
+1. **Media folder reachable:** reads Music's media folder from its preferences (currently an external drive) and aborts if it isn't mounted.
+2. **Playlist must not exist:** if `YYYY.MM.DD` already exists it warns loudly and stops, unless you type `resume` to finish an interrupted import. Resuming skips tracks already in the playlist, adds tracks already in the library without re-importing them, and imports the rest.
+3. **Tracks not already in the library:** looks up each file's artist + title (ignoring spacing, case, punctuation). If any are found it warns and only continues if you type `continue`, in which case the existing library tracks are added to the playlist instead of re-importing.
+
+It then creates the playlist and adds each file to the library, then finds it by artist + title and adds it to the playlist (Music doesn't always hand back a reference to a just-imported track). A track that fails is reported and the rest carry on; the summary tells you to re-run and `resume`. Afterwards it verifies every imported track lives inside the media folder, i.e. Music **copied** the file rather than linking to `TaggedFiles` (which the next run clears). If not, it warns you to turn on *Music → Settings → Files → Copy files to Music Media folder when adding to Library*.
+
+Flags: `--dry-run` (all checks, no import), `--playlist NAME` (override the name), `--tagged-dir`, `--prep-root`, `-y/--yes`.
 
 ### Transcode detection scan
 
@@ -188,7 +235,7 @@ You can enable optional interactive pauses after each stage in dry or non-dry mo
 
 **Mac:**
 ```bash
-poetry run dj-flow --clean-start
+poetry run dj-flow --confirm-steps --dry-run
 ```
 
 **Windows (PowerShell):**
