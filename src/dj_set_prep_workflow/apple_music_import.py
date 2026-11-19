@@ -151,7 +151,10 @@ def playlist_track_ids(playlist: str) -> set[str]:
 on run argv
     set plName to item 1 of argv
     tell application "Music"
-        set ids to persistent ID of every track of user playlist plName
+        set pl to user playlist plName
+        -- Asking an empty playlist for "every track" is an error (-1728).
+        if (count of tracks of pl) is 0 then return ""
+        set ids to persistent ID of every track of pl
     end tell
     set AppleScript's text item delimiters to linefeed
     return ids as text
@@ -342,6 +345,7 @@ def run_apple_music_import(
     print("[STEP] Import tracks")
     not_copied: list[tuple[Path, str]] = []
     failed: list[tuple[Path, str]] = []
+    n_location_checked = 0
     for path in files:
         tags = tags_by_file[path]
         label = f"{tags.artist} - {tags.title}" if tags.title else path.name
@@ -370,6 +374,7 @@ def run_apple_music_import(
 
             if media_folder is not None:
                 location = track_location(pid)
+                n_location_checked += 1
                 if not location or not _is_within(Path(location), media_folder):
                     not_copied.append((path, location))
         except RuntimeError as exc:
@@ -384,8 +389,9 @@ def run_apple_music_import(
             "Turn on: Music > Settings > Files > 'Copy files to Music Media folder",
             "when adding to Library'. Don't clear TaggedFiles until this is fixed.",
         ])
-    elif media_folder is not None:
-        print(f"  Verified: every track's file is inside {media_folder}")
+    elif media_folder is not None and n_location_checked:
+        scope = "every track's" if n_location_checked == len(files) else f"{n_location_checked} of {len(files)} tracks'"
+        print(f"  Verified: {scope} file is inside {media_folder}")
 
     final_count = len(playlist_track_ids(playlist_name))
     if failed:
