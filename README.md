@@ -119,7 +119,7 @@ Expected root directory structure:
 ├── ConvertedFiles
 ├── Logs
 ├── Metadata
-│   ├── raw-track-metadata.csv
+│   ├── tracklist.csv
 │   └── processed-track-metadata.txt
 ├── ProcessedFiles
 ├── SourceFiles
@@ -133,7 +133,7 @@ C:\Users\sherp\OneDrive\Music\DJ-Set-Prep
 ├── ConvertedAIFF
 ├── Logs
 ├── Metadata
-│   ├── raw-track-metadata.csv
+│   ├── tracklist.csv
 │   └── processed-track-metadata.txt
 ├── ProcessedAIFF
 ├── Sourcefiles
@@ -152,9 +152,12 @@ What it does:
 	- runs Reaper render project (`Templates/DJ Set Prep.rpp`),
 	- renames `ProcessedAIFF/output.aif` to `ProcessedAIFF/<filename>.aif`,
 	- runs Essentia and writes JSON/logs to `Logs`,
-  - rewrites destination tags on the rendered AIFF (title append from metadata line 3, Essentia comment, album artist, year/genre),
+  - rewrites destination tags on the rendered AIFF: title/artist/album artist/album/year/genre carried over from the source file (as set by **Prepare source files**), plus the Essentia comment,
   - copies the final tagged AIFF to `TaggedFiles/<filename>.aif`.
 5. Writes full per-track output to `Metadata/processed-track-metadata.txt`.
+6. Prints a loud `[CHECK]` list of any track missing a `[Label Year]` in its title, a year, an album or an album artist (usually a file that **Prepare source files** couldn't match to `tracklist.csv`).
+
+`dj-flow` does **not** read any metadata file: `[Label Year]`, year, album and album artist all come from `tracklist.csv` via **Prepare source files**. (`raw-track-metadata.csv` is no longer used by the weekly flow.)
 
 ### Interactive menu
 
@@ -176,7 +179,7 @@ Items 1–3 are the weekly flow, in order:
 6. **Transcode check only** — runs just the transcode-detection scan below and prints its report; no conversion, rendering, or tagging.
 7. **Quit**
 
-All other options (source dir, metadata file, Reaper/ffmpeg paths, etc.) use `dj-flow`'s defaults. For anything beyond these, use `dj-flow` directly with flags.
+All other options (source dir, Reaper/ffmpeg paths, etc.) use `dj-flow`'s defaults. For anything beyond these, use `dj-flow` directly with flags.
 
 ### Prepare source files
 
@@ -185,10 +188,11 @@ Command: `dj-prep-sources` (or menu item 1)
 0. **Preflight:** matches the promo files' tags against `tracklist.csv` before touching anything. If fewer than half match, it prints a loud warning that the two look like different sets (stale promo folder or tracklist) and aborts unless you type `continue`. `-y` never overrides this.
 1. Shows what will happen and asks for confirmation (`-y` to skip), then **clears** `SourceFiles/`. Aborts without clearing if the promo folder has no audio.
 2. Copies every `.mp3` / `.aif(f)` / `.flac` / `.m4a` from `~/Library/CloudStorage/OneDrive-Personal/Music/ReleasePromo On OneDrive` into `SourceFiles/`. `.wav` files are converted to `.aiff` (same bit depth, tags and artwork carried over). Non-audio files (e.g. `.jpg`) are skipped.
-3. Matches each file to a row in `Metadata/tracklist.csv` (`Title,Artist` columns) and adds that row's `[Label Year]` to the file's title. The CSV comes from the pool web UI and is **release-level**: for EPs and remix packages its title is the release name (e.g. `Double Douze (EP)`), not the track's, and its artist list can include artists from other tracks on the release. So:
+3. Matches each file to a row in `Metadata/tracklist.csv` (`Title,Artist` columns), adds that row's `[Label Year]` to the file's title, and fills in **Year**, **Album Artist** and **Album** when the file has none. The CSV comes from the pool web UI and is **release-level**: for EPs and remix packages its title is the release name (e.g. `Double Douze (EP)`), not the track's, and its artist list can include artists from other tracks on the release. So:
    - **Title written** = the file's own title, tidied (extra spaces collapsed, any old bracketed suffix dropped) + the CSV's `[Label Year]`. E.g. `Lift Him Up (Original Mix) [Natura Viva 2026]`.
    - **Artist written** = the file's own artist (the CSV artist is only used if the file has none).
-   - **Matching** is fuzzy on artist, and compares the CSV title with both the file's title and its **album** tag, so EP rows match their tracks. Each CSV row is used at most once. Matches scoring under 0.85 are flagged `<-- CHECK`, files whose track title differs from the CSV row show that row for reference, and unmatched files/rows are listed (unmatched files keep their tags).
+   - **Only if missing:** **Year** = the year in the CSV's `[Label Year]`; **Album Artist** = the artist written above; **Album** = the track's own name with no version or label/year, e.g. `Lift Him Up (Original Mix) [Natura Viva 2026]` → `Lift Him Up`. Existing values in the file are never overwritten. Filled values are printed as `(was empty, filled from tracklist)`.
+   - **Matching** is fuzzy on artist, and compares the CSV title with both the file's title and its **album** tag, so EP rows match their tracks. Each CSV row is used at most once. Matches scoring under 0.85 are flagged `<-- CHECK`, files whose track title differs from the CSV row show that row for reference, and unmatched files/rows are listed. Unmatched files keep their tags and get a loud warning: fix `tracklist.csv` and re-run before processing, since nothing later adds `[Label Year]`.
 
 Flags: `--prep-root`, `--promo-dir`, `--tracklist`, `--ffmpeg-exe`, `-y/--yes`.
 

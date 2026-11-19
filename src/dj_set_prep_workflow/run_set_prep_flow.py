@@ -25,7 +25,6 @@ from mutagen.id3 import APIC, COMM, TALB, TCON, TIT2, TPE1, TPE2, TDRC
 
 from .detect_transcodes import pause_for_transcode_review, run_transcode_scan
 from .paths import resolve_default_prep_root
-from .tag_set_mp3s import TrackEntry, normalize, parse_set_file
 
 # OS-specific paths
 if sys.platform == "win32":
@@ -40,6 +39,17 @@ else:
     DEFAULT_REAPER_EXE = Path("/usr/bin/reaper")
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".aif", ".aiff", ".flac", ".m4a"}
+
+ID3_TO_EASY_KEYS = {
+    "TIT2": "title",
+    "TPE1": "artist",
+    "TPE2": "albumartist",
+    "TALB": "album",
+    "TDRC": "date",
+    "TCON": "genre",
+    "TBPM": "bpm",
+    "TRCK": "tracknumber",
+}
 
 ENERGY_COMPONENT_KEYS = {
     "beat_mean": "rhythm.beats_loudness.mean",
@@ -127,14 +137,7 @@ class PrepPaths:
     tagged_aiff: Path
     source_files: Path
     templates: Path
-    raw_metadata_file: Path
     processed_metadata_file: Path
-
-
-@dataclass(slots=True)
-class MetadataMatch:
-    entry: TrackEntry | None
-    source: str
 
 
 def build_prep_paths(prep_root: Path) -> PrepPaths:
@@ -148,7 +151,6 @@ def build_prep_paths(prep_root: Path) -> PrepPaths:
         tagged_aiff=prep_root / "TaggedFiles",
         source_files=prep_root / "SourceFiles",
         templates=prep_root / "Templates",
-        raw_metadata_file=metadata_dir / "raw-track-metadata.csv",
         processed_metadata_file=metadata_dir / "processed-track-metadata.txt",
     )
 
@@ -210,6 +212,14 @@ def extract_tags_dict(audio_path: Path) -> dict[str, Any]:
 
     audio = MutagenFile(str(audio_path), easy=True)
     if audio and audio.tags:
+        if isinstance(audio, AIFF):
+            # AIFF has no "easy" mode: map its raw ID3 frames to the easy keys
+            # used everywhere else (title, artist, album, ...).
+            for frame_id, key in ID3_TO_EASY_KEYS.items():
+                frame = audio.tags.get(frame_id)
+                if frame is not None and frame.text:
+                    data[key] = [str(value) for value in frame.text]
+            return data
         for key, values in dict(audio.tags).items():
             if isinstance(values, list):
                 data[key] = [str(value) for value in values]
@@ -219,27 +229,6 @@ def extract_tags_dict(audio_path: Path) -> dict[str, Any]:
     return data
 
 
-def append_suffix_to_title(title: str, suffix: str | None) -> str:
-    if not suffix:
-        return title
-
-    # If the title already has a trailing [label yyyy]-style suffix,
-    # keep it and do not append another metadata suffix.
-    if re.search(r"\[[^\]]*\b(?:19|20)\d{2}\b[^\]]*\]\s*$", title):
-        return title
-
-    title_norm = normalize(title)
-    suffix_norm = normalize(suffix)
-    if suffix_norm and title_norm.endswith(suffix_norm):
-        return title
-
-    # Avoid duplicate title suffixes when title already ends with a bracketed
-    # label/year variant that normalizes to the same text.
-    bracketed_tail = re.search(r"\[(?P<inner>[^\]]+)\]\s*$", title)
-    if bracketed_tail and normalize(bracketed_tail.group("inner")) == suffix_norm:
-        return title
-
-    return f"{title} {suffix}".strip()
 
 
 def read_artwork_frames(source_file: Path, rendered_aiff: Path) -> list[APIC]:
@@ -258,53 +247,8 @@ def read_artwork_frames(source_file: Path, rendered_aiff: Path) -> list[APIC]:
     return frames
 
 
-def find_metadata_match(
-    metadata_entries: list[TrackEntry],
-    source_tags: dict[str, Any],
-    used_entry_indices: set[int],
-    fallback_index: int,
-) -> MetadataMatch:
-    title = str((source_tags.get("title") or [source_tags.get("file_stem", "")])[0]).strip()
-    artist = str((source_tags.get("artist") or [""])[0]).strip()
-    source_stem = str(source_tags.get("file_stem", "")).strip()
-
-    title_key = normalize(title)
-    artist_key = normalize(artist)
-    source_stem_key = normalize(source_stem)
-
-    if source_stem_key:
-        for idx, entry in enumerate(metadata_entries):
-            if idx in used_entry_indices or not entry.filename:
-                continue
-            if normalize(Path(entry.filename).stem) == source_stem_key:
-                used_entry_indices.add(idx)
-                return MetadataMatch(entry=entry, source="filename")
-
-    for idx, entry in enumerate(metadata_entries):
-        if idx in used_entry_indices:
-            continue
-        if normalize(entry.title) == title_key and normalize(entry.artist) == artist_key:
-            used_entry_indices.add(idx)
-            return MetadataMatch(entry=entry, source="title+artist")
-
-    if 0 <= fallback_index < len(metadata_entries) and fallback_index not in used_entry_indices:
-        used_entry_indices.add(fallback_index)
-        return MetadataMatch(entry=metadata_entries[fallback_index], source="sequential-fallback")
-
-    return MetadataMatch(entry=None, source="none")
 
 
-def metadata_suffix(entry: TrackEntry | None) -> str | None:
-    if not entry:
-        return None
-
-    if entry.label and entry.year:
-        return f"[{entry.label} {entry.year}]".strip()
-    if entry.label:
-        return f"[{entry.label.strip()}]"
-    if entry.year:
-        return f"[{entry.year.strip()}]"
-    return None
 
 
 def convert_to_aiff(source_file: Path, converted_dir: Path, ffmpeg_exe: str, dry_run: bool) -> Path:
@@ -739,21 +683,18 @@ def write_tags_to_processed_aiff(
     rendered_aiff: Path,
     source_file: Path,
     source_tags: dict[str, Any],
-    metadata_entry: TrackEntry | None,
     essentia_comment: str,
     default_genre: str,
     dry_run: bool,
 ) -> dict[str, list[str]]:
-    base_title = str((source_tags.get("title") or [source_tags.get("file_stem", rendered_aiff.stem)])[0]).strip()
-    suffix = metadata_suffix(metadata_entry)
-    final_title = append_suffix_to_title(base_title, suffix)
+    # Title, artist, year, album artist and album were set by "Prepare source
+    # files" from tracklist.csv; this step carries them over unchanged.
+    final_title = str((source_tags.get("title") or [source_tags.get("file_stem", rendered_aiff.stem)])[0]).strip()
 
-    artist_value = str((source_tags.get("artist") or [metadata_entry.artist if metadata_entry else ""])[0]).strip()
-    album_artist_value = artist_value
+    artist_value = str((source_tags.get("artist") or [""])[0]).strip()
+    album_artist_value = str((source_tags.get("albumartist") or [artist_value])[0]).strip() or artist_value
 
-    source_year = str((source_tags.get("date") or source_tags.get("year") or [""])[0]).strip()
-    metadata_year = metadata_entry.year if metadata_entry else None
-    year_value = source_year or (metadata_year or "")
+    year_value = str((source_tags.get("date") or source_tags.get("year") or [""])[0]).strip()
 
     genre_value = str((source_tags.get("genre") or [default_genre])[0]).strip() or default_genre
     album_value = str((source_tags.get("album") or ["DJ Set Prep"])[0]).strip() or "DJ Set Prep"
@@ -812,9 +753,48 @@ def write_processed_metadata(records: list[dict[str, Any]], output_file: Path, d
     print("[DONE] Write processed metadata file")
 
 
+LABEL_YEAR_SUFFIX_RE = re.compile(r"\[[^\[\]]*\b(?:19|20)\d{2}\]\s*$")
+
+
+def missing_tag_problems(tags: dict[str, list[str]]) -> list[str]:
+    """What's missing from a track's final tags (empty list = all good)."""
+    def value(key: str) -> str:
+        return str((tags.get(key) or [""])[0]).strip()
+
+    problems = []
+    if not LABEL_YEAR_SUFFIX_RE.search(value("TIT2")):
+        problems.append("no [Label Year] in title")
+    if not value("TDRC"):
+        problems.append("no year")
+    if value("TALB") in {"", "DJ Set Prep"}:
+        problems.append("no album")
+    if not value("TPE2"):
+        problems.append("no album artist")
+    return problems
+
+
+def report_missing_tags(processed_records: list[dict[str, Any]]) -> None:
+    flagged = []
+    for record in processed_records:
+        tags = record.get("processed_tags")
+        if isinstance(tags, dict):
+            problems = missing_tag_problems(tags)
+            if problems:
+                flagged.append((record["source"]["file_name"], problems))
+    if not flagged:
+        print("\n[CHECK] All tracks have [Label Year], year, album and album artist.")
+        return
+    bar = "!" * 72
+    print(f"\n{bar}")
+    print(f"!!  {len(flagged)} track(s) are missing tags. Did 'Prepare source files' match them to tracklist.csv?")
+    print(bar)
+    for name, problems in flagged:
+        print(f"    - {name}: {', '.join(problems)}")
+    print(bar)
+
+
 def run_flow(
     prep_root: Path,
-    set_file: Path | None,
     source_dir: Path | None,
     ffmpeg_exe: str,
     reaper_exe: Path,
@@ -832,15 +812,11 @@ def run_flow(
         clean_working_directories(paths, dry_run=dry_run)
 
     resolved_source_dir = source_dir or paths.source_files
-    resolved_set_file = set_file or paths.raw_metadata_file
     resolved_reaper_project = reaper_project or (paths.templates / "DJ Set Prep.rpp")
 
-    if not resolved_set_file.exists():
-        raise FileNotFoundError(f"Metadata file not found: {resolved_set_file}")
     if not resolved_reaper_project.exists():
         raise FileNotFoundError(f"Reaper project not found: {resolved_reaper_project}")
 
-    metadata_entries = parse_set_file(resolved_set_file)
     source_files = list_source_files(resolved_source_dir)
 
     if not source_files:
@@ -851,7 +827,6 @@ def run_flow(
 
     print(f"DJ-SET-PREP root: {paths.root}")
     print(f"Source files dir: {resolved_source_dir}")
-    print(f"Metadata file: {resolved_set_file}")
     print(f"Reaper project: {resolved_reaper_project}")
     print(f"Source files discovered: {len(source_files)}")
 
@@ -862,7 +837,6 @@ def run_flow(
         pause_for_transcode_review()
 
     processed_records: list[dict[str, Any]] = []
-    used_entry_indices: set[int] = set()
 
     for idx, source_file in enumerate(source_files, start=1):
         print(f"\n=== [{idx}/{len(source_files)}] Processing {source_file.name} ===")
@@ -913,19 +887,10 @@ def run_flow(
         print(f"[INFO] Essentia comment: {essentia_comment}")
         maybe_confirm(confirm_steps, "After Essentia extraction")
 
-        metadata_match = find_metadata_match(
-            metadata_entries,
-            source_tags=source_tags,
-            used_entry_indices=used_entry_indices,
-            fallback_index=idx - 1,
-        )
-        print(f"[INFO] Metadata match source: {metadata_match.source}")
-
         processed_tags = write_tags_to_processed_aiff(
             rendered_aiff,
             source_file=source_file,
             source_tags=source_tags,
-            metadata_entry=metadata_match.entry,
             essentia_comment=essentia_comment,
             default_genre=default_genre,
             dry_run=dry_run,
@@ -957,13 +922,6 @@ def run_flow(
                 "processed_aiff": str(rendered_aiff),
                 "tagged_aiff": str(tagged_aiff),
                 "essentia_json": str(essentia_json),
-                "metadata_match_source": metadata_match.source,
-                "metadata_entry": {
-                    "title": metadata_match.entry.title if metadata_match.entry else None,
-                    "artist": metadata_match.entry.artist if metadata_match.entry else None,
-                    "label": metadata_match.entry.label if metadata_match.entry else None,
-                    "year": metadata_match.entry.year if metadata_match.entry else None,
-                },
                 "source_tags": source_tags,
                 "processed_tags": processed_tags,
                 "essentia_comment": essentia_comment,
@@ -994,18 +952,13 @@ def run_flow(
             update_essentia_comment_frames(tagged_aiff_path, updated_comment, dry_run=dry_run)
 
     write_processed_metadata(processed_records, paths.processed_metadata_file, dry_run=dry_run)
+    report_missing_tags(processed_records)
     print("\nFlow complete.")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run DJ set prep workflow on Sourcefiles.")
     parser.add_argument("--prep-root", type=Path, default=DEFAULT_PREP_ROOT, help="DJ-SET-PREP root directory.")
-    parser.add_argument(
-        "--set-file",
-        type=Path,
-        default=None,
-        help="Optional metadata file path. Default: Metadata/raw-track-metadata.csv under prep root.",
-    )
     parser.add_argument(
         "--source-dir",
         type=Path,
@@ -1044,7 +997,6 @@ def main() -> None:
 
     run_flow(
         prep_root=args.prep_root,
-        set_file=args.set_file,
         source_dir=args.source_dir,
         ffmpeg_exe=args.ffmpeg_exe,
         reaper_exe=args.reaper_exe,

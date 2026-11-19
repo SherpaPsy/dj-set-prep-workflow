@@ -26,7 +26,6 @@ def _run(clean_start: bool, dry_run: bool) -> None:
     args = build_parser().parse_args([])
     run_flow(
         prep_root=args.prep_root,
-        set_file=args.set_file,
         source_dir=args.source_dir,
         ffmpeg_exe=args.ffmpeg_exe,
         reaper_exe=args.reaper_exe,
@@ -66,7 +65,7 @@ def _import_to_apple_music() -> None:
 # Ordered to match the weekly flow: 1 -> 2 -> 3. Each entry is
 # (label, description, action); action None means quit.
 MENU_ITEMS: list[tuple[str, str, Callable[[], None] | None]] = [
-    ("Prepare source files", "Clear SourceFiles, copy/convert from ReleasePromo, apply titles/artists from tracklist.csv.", _prepare_source_files),
+    ("Prepare source files", "Clear SourceFiles, copy/convert from ReleasePromo, apply title, artist and any missing year/album artist/album from tracklist.csv.", _prepare_source_files),
     ("Run clean", "Clear ConvertedFiles, ProcessedFiles, and TaggedFiles, then process all source files.", lambda: _run(clean_start=True, dry_run=False)),
     ("Import to Apple Music", "Import TaggedFiles into a new playlist named for the upcoming Saturday (YYYY.MM.DD).", _import_to_apple_music),
     ("Run", "Process all source files (no cleanup first).", lambda: _run(clean_start=False, dry_run=False)),

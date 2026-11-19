@@ -10,16 +10,15 @@ from mutagen.aiff import AIFF
 from mutagen.id3 import APIC, COMM, TALB, TCON, TIT2, TPE1, TPE2, TDRC, TXXX
 
 from dj_set_prep_workflow.run_set_prep_flow import (
-    append_suffix_to_title,
     build_prep_paths,
     clean_working_directories,
     copy_processed_to_tagged,
     extract_essentia_summary,
-    find_metadata_match,
+    extract_tags_dict,
+    missing_tag_problems,
     sync_reaper_project_to_input,
     write_tags_to_processed_aiff,
 )
-from dj_set_prep_workflow.tag_set_mp3s import TrackEntry
 
 
 def _create_test_aiff(path: Path) -> None:
@@ -31,39 +30,6 @@ def _create_test_aiff(path: Path) -> None:
 
 
 class RunSetPrepFlowTests(unittest.TestCase):
-    def test_find_metadata_match_prefers_filename(self) -> None:
-        metadata_entries = [
-            TrackEntry(
-                title="Shared Title",
-                artist="Shared Artist",
-                label="Label A",
-                year="2026",
-                filename="exact-target-file.mp3",
-            ),
-            TrackEntry(
-                title="Source Title",
-                artist="Source Artist",
-                label="Label B",
-                year="2025",
-                filename="different-file.mp3",
-            ),
-        ]
-
-        match = find_metadata_match(
-            metadata_entries=metadata_entries,
-            source_tags={
-                "title": ["Source Title"],
-                "artist": ["Source Artist"],
-                "file_stem": "exact-target-file",
-            },
-            used_entry_indices=set(),
-            fallback_index=1,
-        )
-
-        self.assertIsNotNone(match.entry)
-        self.assertEqual(match.source, "filename")
-        self.assertEqual(match.entry, metadata_entries[0])
-
     def test_write_tags_replaces_existing_invalid_frames(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             rendered_aiff = Path(tmp_dir) / "rendered.aif"
@@ -80,17 +46,13 @@ class RunSetPrepFlowTests(unittest.TestCase):
                 rendered_aiff,
                 source_file=rendered_aiff,
                 source_tags={
-                    "title": ["Source Title"],
+                    "title": ["Source Title [Bedrock 2024]"],
                     "artist": ["Source Artist"],
                     "genre": ["Progressive House"],
                     "album": ["Source Album"],
+                    "albumartist": ["Source Album Artist"],
+                    "date": ["2024"],
                 },
-                metadata_entry=TrackEntry(
-                    title="Ignored Metadata Title",
-                    artist="Metadata Artist",
-                    label="Bedrock",
-                    year="2024",
-                ),
                 essentia_comment="essentia:bpm=124;key=8A",
                 default_genre="Electronic",
                 dry_run=False,
@@ -98,7 +60,7 @@ class RunSetPrepFlowTests(unittest.TestCase):
 
             self.assertEqual(result["TIT2"], ["Source Title [Bedrock 2024]"])
             self.assertEqual(result["TPE1"], ["Source Artist"])
-            self.assertEqual(result["TPE2"], ["Source Artist"])
+            self.assertEqual(result["TPE2"], ["Source Album Artist"])
             self.assertEqual(result["TCON"], ["Progressive House"])
             self.assertEqual(result["TALB"], ["Source Album"])
             self.assertEqual(result["TDRC"], ["2024"])
@@ -106,7 +68,7 @@ class RunSetPrepFlowTests(unittest.TestCase):
             rewritten = AIFF(rendered_aiff).tags
             self.assertEqual(str(rewritten.get("TIT2")), "Source Title [Bedrock 2024]")
             self.assertEqual(str(rewritten.get("TPE1")), "Source Artist")
-            self.assertEqual(str(rewritten.get("TPE2")), "Source Artist")
+            self.assertEqual(str(rewritten.get("TPE2")), "Source Album Artist")
             self.assertEqual(str(rewritten.get("TCON")), "Progressive House")
             self.assertEqual(str(rewritten.get("TALB")), "Source Album")
             self.assertEqual(str(rewritten.get("TDRC")), "2024")
@@ -138,12 +100,6 @@ class RunSetPrepFlowTests(unittest.TestCase):
                     "title": ["Source Title"],
                     "artist": ["Source Artist"],
                 },
-                metadata_entry=TrackEntry(
-                    title="Ignored Metadata Title",
-                    artist="Metadata Artist",
-                    label="Bedrock",
-                    year="2024",
-                ),
                 essentia_comment="essentia:bpm=124;key=8A",
                 default_genre="Electronic",
                 dry_run=False,
@@ -155,15 +111,36 @@ class RunSetPrepFlowTests(unittest.TestCase):
             self.assertEqual(artwork[0].mime, "image/jpeg")
             self.assertEqual(artwork[0].data, b"\xff\xd8\xff\xd9")
 
-    def test_append_suffix_avoids_duplicate_bracketed_suffix(self) -> None:
-        title = "Source Title [Bedrock 2024]"
-        suffix = "[Bedrock 2024]"
-        self.assertEqual(append_suffix_to_title(title, suffix), title)
+    def test_missing_tag_problems_flags_unlabelled_track(self) -> None:
+        good = {
+            "TIT2": ["Seaweed (Original Mix) [Rynth 2026]"],
+            "TDRC": ["2026"],
+            "TALB": ["Seaweed"],
+            "TPE2": ["Tim Otion"],
+        }
+        self.assertEqual(missing_tag_problems(good), [])
+        bad = {"TIT2": ["Seaweed (Original Mix)"], "TALB": ["DJ Set Prep"], "TPE2": ["Tim Otion"]}
+        self.assertEqual(missing_tag_problems(bad), ["no [Label Year] in title", "no year", "no album"])
 
-    def test_append_suffix_keeps_existing_trailing_label_year(self) -> None:
-        title = "Ultraviolet (Original Mix) [Fluxo 2026]"
-        suffix = "[Drillers 2026]"
-        self.assertEqual(append_suffix_to_title(title, suffix), title)
+    def test_extract_tags_dict_reads_aiff_frames_as_easy_keys(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "source.aif"
+            _create_test_aiff(path)
+            audio = AIFF(path)
+            audio.add_tags()
+            audio.tags.add(TIT2(encoding=3, text=["Help (Extended Mix) [GDB Records 2026]"]))
+            audio.tags.add(TPE1(encoding=3, text=["Tobehonest"]))
+            audio.tags.add(TPE2(encoding=3, text=["Tobehonest"]))
+            audio.tags.add(TALB(encoding=3, text=["Help"]))
+            audio.tags.add(TDRC(encoding=3, text=["2026"]))
+            audio.save()
+
+            tags = extract_tags_dict(path)
+            self.assertEqual(tags["title"], ["Help (Extended Mix) [GDB Records 2026]"])
+            self.assertEqual(tags["artist"], ["Tobehonest"])
+            self.assertEqual(tags["albumartist"], ["Tobehonest"])
+            self.assertEqual(tags["album"], ["Help"])
+            self.assertEqual(tags["date"], ["2026"])
 
     def test_extract_essentia_summary_omits_prefix_and_bpm(self) -> None:
         with TemporaryDirectory() as tmp_dir:

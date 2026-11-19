@@ -5,8 +5,9 @@ Steps:
 2. Copy every audio file that supports full tagging (mp3/aiff/flac/m4a) from the
    promo folder into SourceFiles. WAV files (limited tag support) are converted
    to AIFF instead, carrying their tags and artwork across.
-3. Match each file in SourceFiles to a row in Metadata/tracklist.csv and write
-   that row's Title and Artist into the file's tags.
+3. Match each file in SourceFiles to a row in Metadata/tracklist.csv, write the
+   title (+ the row's [Label Year]) and artist, and fill in Year, Album Artist and
+   Album where the file has none.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from pathlib import Path
 
 from mutagen import File as MutagenFile
 from mutagen.aiff import AIFF
-from mutagen.id3 import ID3, TIT2, TPE1, ID3NoHeaderError
+from mutagen.id3 import ID3, TALB, TDRC, TIT2, TPE1, TPE2, ID3NoHeaderError
 from mutagen.wave import WAVE
 
 from .paths import resolve_default_prep_root
@@ -49,6 +50,8 @@ TRAILING_BRACKET_RE = re.compile(r"\s*(?:\[[^\[\]]*\]|[^\[\]()]*\])\s*$")
 LABEL_SUFFIX_RE = re.compile(r"\[[^\[\]]*\]\s*$")
 # Trailing "(Original Mix)", "(Nicholas Van Orton Remix)", "(Radio Edit)" etc.
 MIX_SUFFIX_RE = re.compile(r"\s*\([^()]*\b(?:mix|remix|edit|dub|version|rework)\)\s*$", re.IGNORECASE)
+# Year at the end of a "[Label 2026]" suffix.
+SUFFIX_YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\]\s*$")
 
 
 @dataclass(slots=True)
@@ -62,6 +65,8 @@ class FileTags:
     title: str
     artist: str
     album: str
+    year: str = ""
+    album_artist: str = ""
 
 
 @dataclass(slots=True)
@@ -214,18 +219,22 @@ def read_tags(path: Path) -> FileTags:
             return FileTags("", "", "")
 
         def frame(key: str) -> str:
-            return str(tags[key].text[0]) if key in tags and tags[key].text else ""
+            return str(tags[key].text[0]).strip() if key in tags and tags[key].text else ""
 
-        return FileTags(frame("TIT2"), frame("TPE1"), frame("TALB"))
+        year = frame("TDRC") or frame("TYER")
+        return FileTags(frame("TIT2"), frame("TPE1"), frame("TALB"), year, frame("TPE2"))
 
     audio = MutagenFile(path, easy=True)
     if audio is None or audio.tags is None:
         return FileTags("", "", "")
 
     def easy(key: str) -> str:
-        return (audio.tags.get(key) or [""])[0]
+        try:
+            return str((audio.tags.get(key) or [""])[0]).strip()
+        except (KeyError, ValueError):
+            return ""
 
-    return FileTags(easy("title"), easy("artist"), easy("album"))
+    return FileTags(easy("title"), easy("artist"), easy("album"), easy("date"), easy("albumartist"))
 
 
 def read_title_artist(path: Path) -> tuple[str, str]:
@@ -241,6 +250,21 @@ def _label_suffix(csv_title: str) -> str:
     """The trailing '[Label 2026]' from a CSV title, or '' if none."""
     match = LABEL_SUFFIX_RE.search(csv_title)
     return _clean_spaces(match.group(0)) if match else ""
+
+
+def year_from_csv_title(csv_title: str) -> str:
+    """'2026' from '... [Label 2026]', or '' if the row has no year."""
+    match = SUFFIX_YEAR_RE.search(csv_title.strip())
+    return match.group(1) if match else ""
+
+
+def track_name(title: str) -> str:
+    """Bare track name: drop '[Label Year]' and the trailing '(... Mix/Version)'.
+
+    'Lift Him Up (Original Mix) [Natura Viva 2026]' -> 'Lift Him Up'
+    """
+    base = _clean_spaces(_strip_label_suffix(title))
+    return _clean_spaces(MIX_SUFFIX_RE.sub("", base)) or base
 
 
 def build_title(file_title: str, csv_title: str) -> str:
@@ -300,25 +324,55 @@ def match_files(files: list[Path], tracks: list[CsvTrack]) -> tuple[list[Match],
     return matched, unmatched_files, unmatched_tracks
 
 
-def write_title_artist(path: Path, title: str, artist: str) -> None:
-    ext = path.suffix.lower()
-    if ext == ".mp3":
-        try:
-            tags = ID3(path)
-        except ID3NoHeaderError:
-            tags = ID3()
-        tags.setall("TIT2", [TIT2(encoding=3, text=title)])
-        tags.setall("TPE1", [TPE1(encoding=3, text=artist)])
-        tags.save(path)
-        return
+def plan_tags(tags: FileTags, track: CsvTrack) -> dict[str, str]:
+    """Tags to write for a matched file.
 
-    if ext in {".aif", ".aiff"}:
-        audio = AIFF(path)
-        if audio.tags is None:
-            audio.add_tags()
-        audio.tags.setall("TIT2", [TIT2(encoding=3, text=title)])
-        audio.tags.setall("TPE1", [TPE1(encoding=3, text=artist)])
-        audio.save()
+    Title and artist are always written. Year, album artist and album are only
+    filled in when the file has none (the file's own values win).
+    """
+    title = build_title(tags.title, track.title)
+    # Artist comes from the file (track-level); the CSV artist is release-level.
+    artist = _clean_spaces(tags.artist) or track.artist
+    planned = {"title": title, "artist": artist}
+    if not tags.year:
+        year = year_from_csv_title(track.title)
+        if year:
+            planned["year"] = year
+    if not tags.album_artist and artist:
+        planned["album_artist"] = artist
+    if not tags.album:
+        # No album tag: use the track's own name (no version, no label/year).
+        album = track_name(title)
+        if album:
+            planned["album"] = album
+    return planned
+
+
+ID3_FRAMES = {"title": TIT2, "artist": TPE1, "year": TDRC, "album_artist": TPE2, "album": TALB}
+EASY_KEYS = {"title": "title", "artist": "artist", "year": "date", "album_artist": "albumartist", "album": "album"}
+
+
+def write_tags(path: Path, values: dict[str, str]) -> None:
+    ext = path.suffix.lower()
+    if ext in {".mp3", ".aif", ".aiff"}:
+        if ext == ".mp3":
+            try:
+                tags = ID3(path)
+            except ID3NoHeaderError:
+                tags = ID3()
+            audio = None
+        else:
+            audio = AIFF(path)
+            if audio.tags is None:
+                audio.add_tags()
+            tags = audio.tags
+        for key, value in values.items():
+            frame = ID3_FRAMES[key]
+            tags.setall(frame.__name__, [frame(encoding=3, text=value)])
+        if audio is None:
+            tags.save(path)
+        else:
+            audio.save()
         return
 
     audio = MutagenFile(path, easy=True)
@@ -326,9 +380,13 @@ def write_title_artist(path: Path, title: str, artist: str) -> None:
         raise ValueError(f"Unsupported file for tagging: {path}")
     if audio.tags is None:
         audio.add_tags()
-    audio["title"] = [title]
-    audio["artist"] = [artist]
+    for key, value in values.items():
+        audio[EASY_KEYS[key]] = [value]
     audio.save()
+
+
+def write_title_artist(path: Path, title: str, artist: str) -> None:
+    write_tags(path, {"title": title, "artist": artist})
 
 
 def apply_tracklist(files: list[Path], tracklist_csv: Path) -> None:
@@ -338,18 +396,23 @@ def apply_tracklist(files: list[Path], tracklist_csv: Path) -> None:
 
     for m in sorted(matched, key=lambda m: m.path.name.lower()):
         flag = "" if m.score >= CONFIDENT_SCORE else "  <-- CHECK"
-        title = build_title(m.tags.title, m.track.title)
-        # Artist comes from the file (track-level); the CSV artist is release-level.
-        artist = _clean_spaces(m.tags.artist) or m.track.artist
+        planned = plan_tags(m.tags, m.track)
         print(f"  [TAG {m.score:.2f}] {m.path.name}{flag}")
-        print(f"      title:  {title}")
-        print(f"      artist: {artist}")
-        if _strip_label_suffix(title) != _strip_label_suffix(m.track.title):
+        print(f"      title:  {planned['title']}")
+        print(f"      artist: {planned['artist']}")
+        for key, label in (("year", "year"), ("album_artist", "album artist"), ("album", "album")):
+            if key in planned:
+                print(f"      {label}: {planned[key]}  (was empty, filled from tracklist)")
+        if _strip_label_suffix(planned["title"]) != _strip_label_suffix(m.track.title):
             print(f"      (tracklist row: {m.track.artist} | {m.track.title})")
-        write_title_artist(m.path, title, artist)
+        write_tags(m.path, planned)
 
     if unmatched_files:
-        print(f"\n  [WARN] {len(unmatched_files)} file(s) had no match in the tracklist (tags left unchanged):")
+        bar = "!" * 72
+        print(f"\n{bar}")
+        print(f"!!  {len(unmatched_files)} file(s) had NO match in the tracklist. Their tags were NOT changed,")
+        print("!!  so they have no [Label Year]. Fix tracklist.csv and re-run this step before processing.")
+        print(bar)
         for path in unmatched_files:
             title, artist = read_title_artist(path)
             print(f"    - {path.name}  (artist={artist!r}, title={title!r})")
@@ -435,14 +498,14 @@ def run_prepare_source_files(
     if skipped:
         print(f"  Skipped {len(skipped)} non-audio file(s): {', '.join(p.name for p in skipped)}")
 
-    print("\n[STEP 3] Apply title/artist from tracklist")
+    print("\n[STEP 3] Apply title/artist (+ missing year/album artist/album) from tracklist")
     apply_tracklist(imported, tracklist_csv)
 
     print("\n[DONE] Prepare source files")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Refresh SourceFiles from the promo folder and apply tracklist.csv titles/artists.")
+    parser = argparse.ArgumentParser(description="Refresh SourceFiles from the promo folder and apply tracklist.csv title, artist and missing year/album artist/album.")
     parser.add_argument("--prep-root", type=Path, default=resolve_default_prep_root())
     parser.add_argument("--promo-dir", type=Path, default=DEFAULT_PROMO_DIR)
     parser.add_argument("--tracklist", type=Path, default=None, help="Default: Metadata/tracklist.csv under prep root.")
